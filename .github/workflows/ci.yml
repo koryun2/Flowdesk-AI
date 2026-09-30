@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - run: python -m pip install -r backend/requirements.txt
+      - run: python manage.py test
+        working-directory: backend
+        env:
+          DJANGO_SECRET_KEY: ci-only-secret-key-not-for-production-use
+
+  ai-service:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: ai-service/requirements.txt
+      - run: python -m pip install -r ai-service/requirements.txt
+      - run: python -m unittest discover -s ai-service/tests
+        env:
+          PYTHONPATH: ai-service
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+      - run: npm run lint
+        working-directory: frontend
+      - run: npm test
+        working-directory: frontend
+      - run: npm run build
+        working-directory: frontend
+
+  postgres:
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_DB: flowdesk
+          POSTGRES_USER: flowdesk
+          POSTGRES_PASSWORD: flowdesk
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U flowdesk -d flowdesk"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - run: python -m pip install -r backend/requirements.txt
+      - run: python manage.py migrate
+        working-directory: backend
+        env:
+          DJANGO_SECRET_KEY: ci-only-secret-key-not-for-production-use
+          DB_ENGINE: django.db.backends.postgresql
+          POSTGRES_DB: flowdesk
+          POSTGRES_USER: flowdesk
+          POSTGRES_PASSWORD: flowdesk
+          DB_HOST: localhost
+          DB_PORT: "5432"

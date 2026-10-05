@@ -1,6 +1,7 @@
 import logging
 import re
 
+from .classifier import ANALYSIS_MODELS
 from .config import Settings
 from .gemini import generate_json
 
@@ -72,10 +73,12 @@ PLAN_SCHEMA = {
 }
 
 
-def plan_message(message: str, settings: Settings, prior: str = "") -> dict:
+def plan_message(message: str, settings: Settings, prior: str = "", model: str = "") -> dict:
+    if model in ANALYSIS_MODELS:
+        settings = settings.model_copy(update={"gemini_model": model})
     if settings.gemini_api_key:
         try:
-            plan = plan_with_gemini(message, settings)
+            plan = plan_with_gemini(message, settings, prior)
         except RuntimeError as exc:
             logger.warning("Falling back to the local agent planner: %s", exc)
             plan = plan_locally(message)
@@ -116,7 +119,10 @@ def plan_locally(message: str) -> dict:
     return {"tool_calls": calls[:4], "reply": "", "model_name": LOCAL_AGENT_MODEL}
 
 
-def plan_with_gemini(message: str, settings: Settings) -> dict:
+def plan_with_gemini(message: str, settings: Settings, prior: str = "") -> dict:
+    user_text = message
+    if prior.strip():
+        user_text = f"Recent conversation:\n{prior.strip()}\n\nNew request:\n{message}"
     try:
         content = generate_json(
             (
@@ -127,9 +133,10 @@ def plan_with_gemini(message: str, settings: Settings) -> dict:
                 "Use search_knowledge_base for documentation questions. "
                 "Use create_ticket, update_ticket, and add_ticket_comment only when the user asks to change data. "
                 "Leave unused argument strings empty, is_internal false, and created_within_days 0. "
-                "Do not invent ticket numbers. Put ticket keys such as FD-1284 in the ticket field."
+                "Do not invent ticket numbers. Put ticket keys such as FD-1284 in the ticket field. "
+                "Use the recent conversation when the new request refers to it."
             ),
-            message,
+            user_text,
             PLAN_SCHEMA,
             settings,
         )

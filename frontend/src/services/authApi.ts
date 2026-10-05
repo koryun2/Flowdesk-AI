@@ -130,6 +130,41 @@ export async function fetchCurrentUser() {
   return mapUser(await response.json())
 }
 
+export async function updateProfile(input: {
+  name: string
+  email: string
+  timezone: string
+}) {
+  const [firstName, ...rest] = input.name.trim().split(/\s+/)
+  const response = await authorizedFetch('/api/v1/auth/me/', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      first_name: firstName,
+      last_name: rest.join(' '),
+      email: input.email.trim(),
+      timezone: input.timezone,
+    }),
+  })
+  if (!response.ok) throw await parseError(response)
+  return mapUser(await response.json())
+}
+
+export async function changePassword(input: {
+  currentPassword: string
+  newPassword: string
+}) {
+  const response = await authorizedFetch('/api/v1/auth/password/', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      current_password: input.currentPassword,
+      new_password: input.newPassword,
+    }),
+  })
+  if (!response.ok) throw await parseError(response)
+}
+
 export async function authorizedFetch(path: string, options: RequestInit = {}) {
   const headers = new Headers(options.headers)
   if (authStorage.access) headers.set('Authorization', `Bearer ${authStorage.access}`)

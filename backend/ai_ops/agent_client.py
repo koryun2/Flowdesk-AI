@@ -12,11 +12,13 @@ class AgentAIError(Exception):
     pass
 
 
-def request_plan(message: str, prior: str = "") -> dict:
+def request_plan(message: str, prior: str = "", model: str = "") -> dict:
     url = f"{settings.AI_SERVICE_URL.rstrip('/')}/v1/agent/plan"
     body = {"message": message}
     if prior:
-        body["prior"] = prior[:500]
+        body["prior"] = prior[:4000]
+    if model:
+        body["model"] = model
     http_request = request.Request(
         url,
         data=json.dumps(body).encode(),

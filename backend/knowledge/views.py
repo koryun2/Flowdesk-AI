@@ -163,6 +163,7 @@ class KnowledgeDocumentViewSet(viewsets.ModelViewSet):
             context={
                 "detail": document.title,
                 "chunks": (document.metadata or {}).get("chunk_count", 0),
+                "status": document.status,
             },
         )
 

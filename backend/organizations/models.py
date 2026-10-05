@@ -3,6 +3,8 @@ from django.db import models
 
 from core.models import TimeStampedUUIDModel
 
+ANALYSIS_MODELS = ("gemma-4-26b-a4b-it", "gemini-3.6-flash")
+
 
 class Organization(TimeStampedUUIDModel):
     class Plan(models.TextChoices):

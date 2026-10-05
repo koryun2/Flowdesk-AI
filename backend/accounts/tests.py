@@ -137,6 +137,58 @@ class AuthenticationTests(APITestCase):
         self.assertFalse(permission.has_permission(viewer_request, view))
         self.assertTrue(permission.has_permission(agent_request, view))
 
+    def test_profile_and_password_changes_persist(self):
+        self._register()
+        login = self.client.post(
+            reverse("auth-token"),
+            {"email": "ada@example.com", "password": "Flowdesk-Test-Pass-91"},
+            format="json",
+        )
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {login.data['access']}")
+
+        profile = self.client.patch(
+            reverse("auth-me"),
+            {
+                "first_name": "Ada",
+                "last_name": "Byron",
+                "email": "ada.byron@example.com",
+                "timezone": "Asia/Yerevan",
+            },
+            format="json",
+        )
+        wrong = self.client.post(
+            reverse("auth-password"),
+            {"current_password": "nope", "new_password": "Flowdesk-Next-Pass-91"},
+            format="json",
+        )
+        changed = self.client.post(
+            reverse("auth-password"),
+            {
+                "current_password": "Flowdesk-Test-Pass-91",
+                "new_password": "Flowdesk-Next-Pass-91",
+            },
+            format="json",
+        )
+        self.client.credentials()
+        old_login = self.client.post(
+            reverse("auth-token"),
+            {"email": "ada.byron@example.com", "password": "Flowdesk-Test-Pass-91"},
+            format="json",
+        )
+        new_login = self.client.post(
+            reverse("auth-token"),
+            {"email": "ada.byron@example.com", "password": "Flowdesk-Next-Pass-91"},
+            format="json",
+        )
+
+        self.assertEqual(profile.status_code, status.HTTP_200_OK)
+        self.assertEqual(profile.data["last_name"], "Byron")
+        self.assertEqual(profile.data["timezone"], "Asia/Yerevan")
+        self.assertEqual(wrong.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(changed.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(old_login.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(new_login.status_code, status.HTTP_200_OK)
+
     def test_health_endpoint_stays_public(self):
         response = self.client.get(reverse("health-check"))
         self.assertEqual(response.status_code, status.HTTP_200_OK)

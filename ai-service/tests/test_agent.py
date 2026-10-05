@@ -144,3 +144,17 @@ class LocalAgentPlannerTests(unittest.TestCase):
             "Say which customer to look up.",
         )
         self.assertEqual(plan["tool_calls"][0]["arguments"]["scope"], "all")
+
+    def test_gemini_plan_sees_the_recent_conversation_and_model(self):
+        with patch("app.agent.generate_json", return_value={"tool_calls": [], "reply": "ok"}) as generate:
+            plan = plan_message(
+                "update the second one",
+                Settings(_env_file=None, gemini_api_key="test-key", gemini_model="gemma-4-26b-a4b-it"),
+                "Assistant: FD-1284 CSV export",
+                "gemini-3.6-flash",
+            )
+
+        user_text = generate.call_args.args[1]
+        self.assertIn("FD-1284", user_text)
+        self.assertIn("update the second one", user_text)
+        self.assertEqual(plan["model_name"], "gemini-3.6-flash")

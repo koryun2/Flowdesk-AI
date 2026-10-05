@@ -65,6 +65,7 @@ export function TicketDetailPage() {
     onSuccess: () => {
       setReply('')
       refresh()
+      void queryClient.invalidateQueries({ queryKey: ['notifications'] })
       notify(isInternal ? 'Internal note added' : 'Reply sent')
     },
     onError: () => notify('Unable to add comment', 'error'),
@@ -74,6 +75,7 @@ export function TicketDetailPage() {
     mutationFn: () => workspaceApi.analyzeTicket(ticketId),
     onSuccess: () => {
       refresh()
+      void queryClient.invalidateQueries({ queryKey: ['notifications'] })
       notify('Ticket analysis updated')
     },
     onError: () => notify('Unable to analyze this ticket', 'error'),

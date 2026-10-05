@@ -38,14 +38,14 @@ export function AgentPage() {
   const mutation = useMutation({
     mutationFn: ({
       message,
-      prior,
       conversationId: id,
     }: {
       message: string
-      prior: string
       conversationId: string | null
-    }) => workspaceApi.runAgent(message, prior, id),
+    }) => workspaceApi.runAgent(message, id),
     onSuccess: (result, variables) => {
+      void queryClient.invalidateQueries({ queryKey: ['notifications'] })
+      void queryClient.invalidateQueries({ queryKey: ['workspace-usage'] })
       queryClient.setQueryData<AgentConversation[]>(['agent-conversations'], (current = []) => {
         const existing = current.find((item) => item.id === result.conversationId)
         const title = existing?.title ?? variables.message.trim().slice(0, 80)
@@ -70,6 +70,8 @@ export function AgentPage() {
     mutationFn: ({ id, choice }: { id: string; choice: 'approve' | 'cancel' }) =>
       workspaceApi.decideAgentAction(id, choice),
     onSuccess: (tool) => {
+      void queryClient.invalidateQueries({ queryKey: ['notifications'] })
+      void queryClient.invalidateQueries({ queryKey: ['workspace-usage'] })
       setMessages((current) =>
         current.map((message) => ({
           ...message,
@@ -100,9 +102,7 @@ export function AgentPage() {
       },
     ])
     setPrompt('')
-    const prior =
-      [...messages].reverse().find((item) => item.role === 'assistant')?.content ?? ''
-    mutation.mutate({ message: clean, prior, conversationId })
+    mutation.mutate({ message: clean, conversationId })
   }
 
   const submit = (event: FormEvent) => {

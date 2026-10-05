@@ -61,3 +61,44 @@ class ActivityLog(models.Model):
 
     def __str__(self) -> str:
         return f"{self.action} {self.entity_type}:{self.entity_id}"
+
+
+class Notification(models.Model):
+    class Tone(models.TextChoices):
+        TICKET = "ticket", "Ticket"
+        AI = "ai", "AI"
+        KNOWLEDGE = "knowledge", "Knowledge"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        related_name="notifications",
+    )
+    recipient = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="notifications",
+    )
+    title = models.CharField(max_length=160)
+    detail = models.CharField(max_length=240, blank=True)
+    tone = models.CharField(max_length=20, choices=Tone.choices)
+    link = models.CharField(max_length=200, blank=True)
+    read_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(
+                fields=["organization", "recipient", "-created_at"],
+                name="notice_recipient_created_idx",
+            ),
+            models.Index(
+                fields=["recipient", "read_at"],
+                name="notice_recipient_read_idx",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return self.title

@@ -42,6 +42,7 @@ export function AddSourceForm({ open, onClose }: AddSourceFormProps) {
     onSuccess: (document) => {
       queryClient.invalidateQueries({ queryKey: ['documents'] })
       queryClient.invalidateQueries({ queryKey: ['document-summary'] })
+      queryClient.invalidateQueries({ queryKey: ['notifications'] })
       setTitle('')
       setSource('')
       setFile(null)

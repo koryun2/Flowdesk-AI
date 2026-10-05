@@ -13,9 +13,11 @@ import {
   X,
   type LucideIcon,
 } from 'lucide-react'
+import { useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useMatch, useResolvedPath } from 'react-router-dom'
 import type { Membership } from '../../services/authApi'
+import { workspaceApi } from '../../services/workspaceApi'
 import {
   Brand,
   BrandMark,
@@ -25,8 +27,6 @@ import {
   NavItem,
   NavItemAnchor,
   NavItemSpark,
-  Progress,
-  ProgressFill,
   SectionLabel,
   Sidebar as SidebarPanel,
   SidebarBrand,
@@ -109,6 +109,10 @@ export function Sidebar({
   onCloseMobile,
   onToggleCollapsed,
 }: SidebarProps) {
+  const usage = useQuery({
+    queryKey: ['workspace-usage'],
+    queryFn: () => workspaceApi.getWorkspaceUsage(),
+  })
   const [workspaceOpen, setWorkspaceOpen] = useState(false)
   const settingsResolved = useResolvedPath('/settings')
   const settingsMatch = useMatch({ path: settingsResolved.pathname, end: false })
@@ -199,12 +203,9 @@ export function Sidebar({
         <UsageCard $collapsed={collapsed}>
           <UsageCardHeader>
             <span>AI actions</span>
-            <strong>742 / 1k</strong>
+            <strong>{usage.data?.actionsThisMonth ?? 0}</strong>
           </UsageCardHeader>
-          <Progress>
-            <ProgressFill style={{ width: '74.2%' }} />
-          </Progress>
-          <UsageCardHint>Resets in 8 days</UsageCardHint>
+          <UsageCardHint>This month</UsageCardHint>
         </UsageCard>
         <CollapseButton
           $collapsed={collapsed}

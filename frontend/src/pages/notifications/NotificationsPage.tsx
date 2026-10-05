@@ -1,12 +1,10 @@
-import {
-  CheckCircle2,
-  CircleAlert,
-  Mail,
-  Sparkles,
-} from 'lucide-react'
-import { useState } from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { BookOpen, CircleAlert, Sparkles } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
 import { Button, Page, PageHeader } from '../../components/ui'
 import { formatRelative } from '../../lib/utils'
+import { workspaceApi } from '../../services/workspaceApi'
+import type { AppNotification } from '../../services/workspaceApi'
 import {
   NotificationIcon,
   NotificationItem,
@@ -14,51 +12,41 @@ import {
   UnreadDot,
 } from './styles'
 
-const notificationItems = [
-  {
-    icon: CircleAlert,
-    title: 'Urgent ticket assigned to Maya',
-    detail: 'FD-1284 · CSV export fails for datasets over 50k rows',
-    time: new Date(Date.now() - 4 * 60_000).toISOString(),
-    unread: true,
-  },
-  {
-    icon: Sparkles,
-    title: 'AI classification batch completed',
-    detail: '3 new tickets were classified with an average 94% confidence.',
-    time: new Date(Date.now() - 18 * 60_000).toISOString(),
-    unread: true,
-  },
-  {
-    icon: CheckCircle2,
-    title: 'Knowledge source is ready',
-    detail: 'Billing and subscription FAQ was split into 24 chunks.',
-    time: new Date(Date.now() - 70 * 60_000).toISOString(),
-    unread: true,
-  },
-  {
-    icon: Mail,
-    title: 'New customer reply',
-    detail: 'Amelia replied to FD-1283.',
-    time: new Date(Date.now() - 26 * 60 * 60_000).toISOString(),
-    unread: false,
-  },
-]
+const icons = {
+  ticket: CircleAlert,
+  ai: Sparkles,
+  knowledge: BookOpen,
+} as const
 
 export function NotificationsPage() {
-  const [items, setItems] = useState(notificationItems)
+  const navigate = useNavigate()
+  const queryClient = useQueryClient()
+  const notifications = useQuery({
+    queryKey: ['notifications'],
+    queryFn: () => workspaceApi.listNotifications(),
+  })
+  const markRead = useMutation({
+    mutationFn: (id?: string) => workspaceApi.markNotificationRead(id),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['notifications'] })
+    },
+  })
+  const items = notifications.data?.results ?? []
+
+  const open = (item: AppNotification) => {
+    if (!item.read) markRead.mutate(item.id)
+    if (item.link) navigate(item.link)
+  }
+
   return (
     <Page>
       <PageHeader
         title="Notifications"
-        description="Updates from tickets, AI workflows, and your team."
+        description="Updates from tickets, analysis, and the knowledge base."
         actions={
           <Button
-            onClick={() =>
-              setItems((current) =>
-                current.map((item) => ({ ...item, unread: false })),
-              )
-            }
+            disabled={!notifications.data?.unreadCount}
+            onClick={() => markRead.mutate(undefined)}
             variant="secondary"
           >
             Mark all as read
@@ -66,32 +54,36 @@ export function NotificationsPage() {
         }
       />
       <NotificationPageList>
-        {items.map(({ icon: Icon, ...item }) => (
-          <NotificationItem
-            $unread={item.unread}
-            key={item.title}
-            onClick={() =>
-              setItems((current) =>
-                current.map((currentItem) =>
-                  currentItem.title === item.title
-                    ? { ...currentItem, unread: false }
-                    : currentItem,
-                ),
-              )
-            }
-            type="button"
-          >
-            <NotificationIcon>
-              <Icon size={18} />
-            </NotificationIcon>
+        {items.length === 0 ? (
+          <NotificationItem $unread={false} disabled type="button">
             <span>
-              <strong>{item.title}</strong>
-              <small>{item.detail}</small>
+              <strong>No notifications yet</strong>
+              <small>New tickets, analyses, and knowledge sources will appear here.</small>
             </span>
-            <time>{formatRelative(item.time)}</time>
-            {item.unread ? <UnreadDot /> : null}
           </NotificationItem>
-        ))}
+        ) : (
+          items.map((item) => {
+            const Icon = icons[item.tone]
+            return (
+              <NotificationItem
+                $unread={!item.read}
+                key={item.id}
+                onClick={() => open(item)}
+                type="button"
+              >
+                <NotificationIcon>
+                  <Icon size={16} />
+                </NotificationIcon>
+                <span>
+                  <strong>{item.title}</strong>
+                  <small>{item.detail}</small>
+                </span>
+                <time>{formatRelative(item.createdAt)}</time>
+                {item.read ? null : <UnreadDot />}
+              </NotificationItem>
+            )
+          })
+        )}
       </NotificationPageList>
     </Page>
   )

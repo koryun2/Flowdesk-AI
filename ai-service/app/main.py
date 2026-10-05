@@ -115,7 +115,8 @@ def create_embeddings(payload: EmbeddingRequest) -> EmbeddingResponse:
 
 class AgentPlanRequest(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
-    prior: str = Field(default="", max_length=500)
+    prior: str = Field(default="", max_length=4000)
+    model: str = Field(default="", max_length=80)
 
 
 class AgentPlanResponse(BaseModel):
@@ -126,7 +127,12 @@ class AgentPlanResponse(BaseModel):
 
 @app.post("/v1/agent/plan", tags=["agent"], response_model=AgentPlanResponse)
 def plan_agent_turn(payload: AgentPlanRequest) -> AgentPlanResponse:
-    plan = plan_message(payload.message.strip(), get_settings(), payload.prior.strip())
+    plan = plan_message(
+        payload.message.strip(),
+        get_settings(),
+        payload.prior.strip(),
+        payload.model.strip(),
+    )
     return AgentPlanResponse(**plan)
 
 

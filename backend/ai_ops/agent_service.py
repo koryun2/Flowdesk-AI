@@ -13,7 +13,7 @@ from audit.models import ActivityLog
 from audit.services import record_activity
 from customers.models import Customer
 from knowledge.services import answer_question
-from organizations.models import Membership
+from organizations.models import ANALYSIS_MODELS, Membership
 from tickets.models import Ticket
 from tickets.serializers import CommentSerializer, TicketSerializer
 from tickets.views import OPEN_STATUSES, ticket_search
@@ -35,8 +35,12 @@ class _Actor:
 
 
 def run_turn(user, membership, message: str, prior: str = "", conversation_id=None) -> dict:
+    context = _planner_context(user, membership, conversation_id)
+    model = membership.organization.analysis_model
+    if model not in ANALYSIS_MODELS:
+        model = ANALYSIS_MODELS[0]
     try:
-        plan = request_plan(message, prior)
+        plan = request_plan(message, context or prior[:4000], model)
     except AgentAIError as exc:
         raise ValidationError({"message": str(exc)}) from exc
     tool_calls = []
@@ -445,6 +449,31 @@ def _pending_action(user, membership, action_id) -> AgentAction:
     if not _can_write(membership):
         raise PermissionDenied("Your workspace role cannot change tickets.")
     return action
+
+
+def _planner_context(user, membership, conversation_id) -> str:
+    if not conversation_id:
+        return ""
+    try:
+        parsed = UUID(str(conversation_id))
+    except (TypeError, ValueError):
+        return ""
+    conversation = AgentConversation.objects.filter(
+        pk=parsed,
+        organization=membership.organization,
+        actor=user,
+    ).first()
+    if conversation is None:
+        return ""
+    messages = list(conversation.messages.order_by("-created_at")[:8])
+    lines = []
+    for message in reversed(messages):
+        text = re.sub(r"\s+", " ", message.content).strip()[:400]
+        if not text:
+            continue
+        role = "User" if message.role == AgentMessage.Role.USER else "Assistant"
+        lines.append(f"{role}: {text}")
+    return "\n".join(lines)[:4000]
 
 
 def _conversation(user, membership, message: str, conversation_id) -> AgentConversation:

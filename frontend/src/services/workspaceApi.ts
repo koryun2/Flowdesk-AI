@@ -185,22 +185,64 @@ interface ApiAgentMessage {
 }
 
 export interface WorkspaceSettings {
+  name: string
+  slug: string
   autoAnalyzeTickets: boolean
   requireAgentApproval: boolean
   analysisModel: string
 }
 
+export interface WorkspaceUsage {
+  actionsThisMonth: number
+}
+
+export interface AppNotification {
+  id: string
+  title: string
+  detail: string
+  tone: 'ticket' | 'ai' | 'knowledge'
+  link: string
+  read: boolean
+  createdAt: string
+}
+
 interface ApiWorkspaceSettings {
+  name: string
+  slug: string
   auto_analyze_tickets: boolean
   require_agent_approval: boolean
   analysis_model: string
 }
 
+interface ApiNotification {
+  id: string
+  title: string
+  detail: string
+  tone: AppNotification['tone']
+  link: string
+  read: boolean
+  created_at: string
+}
+
 function toWorkspaceSettings(settings: ApiWorkspaceSettings): WorkspaceSettings {
   return {
+    name: settings.name,
+    slug: settings.slug,
     autoAnalyzeTickets: settings.auto_analyze_tickets,
     requireAgentApproval: settings.require_agent_approval,
     analysisModel: settings.analysis_model,
+  }
+}
+
+function toNotification(row: ApiNotification): AppNotification {
+  return {
+    id: row.id,
+    title: row.title,
+    detail: row.detail,
+    tone: row.tone,
+    link: row.link,
+    read: row.read,
+    createdAt: row.created_at,
   }
 }
 
@@ -595,13 +637,12 @@ export const workspaceApi = {
     return (payload.messages ?? []).map(toAgentMessage)
   },
 
-  async runAgent(message: string, prior = '', conversationId?: string | null) {
+  async runAgent(message: string, conversationId?: string | null) {
     const payload = await request<ApiAgentMessage>('/api/v1/agent/turns/', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         message,
-        prior,
         ...(conversationId ? { conversation_id: conversationId } : {}),
       }),
     })
@@ -623,7 +664,12 @@ export const workspaceApi = {
     return toWorkspaceSettings(settings)
   },
 
-  async saveWorkspaceSettings(settings: WorkspaceSettings) {
+  async saveWorkspaceSettings(
+    settings: Pick<
+      WorkspaceSettings,
+      'autoAnalyzeTickets' | 'requireAgentApproval' | 'analysisModel'
+    >,
+  ) {
     const saved = await request<ApiWorkspaceSettings>('/api/v1/workspace/settings/', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
@@ -634,5 +680,36 @@ export const workspaceApi = {
       }),
     })
     return toWorkspaceSettings(saved)
+  },
+
+  async saveWorkspaceProfile(input: { name: string; slug: string }) {
+    const saved = await request<ApiWorkspaceSettings>('/api/v1/workspace/settings/', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    })
+    return toWorkspaceSettings(saved)
+  },
+
+  async getWorkspaceUsage() {
+    const usage = await request<{ actions_this_month: number }>('/api/v1/workspace/usage/')
+    return { actionsThisMonth: usage.actions_this_month }
+  },
+
+  async listNotifications() {
+    const payload = await request<{ unread_count: number; results: ApiNotification[] }>(
+      '/api/v1/notifications/',
+    )
+    return {
+      unreadCount: payload.unread_count,
+      results: payload.results.map(toNotification),
+    }
+  },
+
+  async markNotificationRead(id?: string) {
+    await request<void>(
+      id ? `/api/v1/notifications/${id}/read/` : '/api/v1/notifications/read/',
+      { method: 'POST' },
+    )
   },
 }

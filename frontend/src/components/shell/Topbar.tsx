@@ -1,7 +1,11 @@
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Bell, ChevronDown, LogOut, Menu, Settings } from 'lucide-react'
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { formatRelative } from '../../lib/utils'
 import { useAuth } from '../../providers/auth-context'
+import { workspaceApi } from '../../services/workspaceApi'
+import type { AppNotification } from '../../services/workspaceApi'
 import type { User } from '../../types'
 import { Avatar } from '../ui'
 import {
@@ -26,27 +30,6 @@ import {
   TopbarLeft,
 } from './styles'
 
-const notifications = [
-  {
-    title: 'Urgent ticket assigned',
-    detail: 'FD-1284 was assigned to Maya',
-    time: '4m',
-    tone: 'urgent',
-  },
-  {
-    title: 'AI analysis complete',
-    detail: '3 new tickets have been classified',
-    time: '18m',
-    tone: 'ai',
-  },
-  {
-    title: 'Knowledge source ready',
-    detail: 'Billing FAQ finished processing',
-    time: '1h',
-    tone: 'success',
-  },
-]
-
 type TopbarProps = {
   profile: User
   onOpenMobile: () => void
@@ -54,10 +37,28 @@ type TopbarProps = {
 
 export function Topbar({ profile, onOpenMobile }: TopbarProps) {
   const { signOut } = useAuth()
+  const queryClient = useQueryClient()
+  const navigate = useNavigate()
   const [notificationsOpen, setNotificationsOpen] = useState(false)
   const [profileOpen, setProfileOpen] = useState(false)
-  const [notificationsRead, setNotificationsRead] = useState(false)
-  const navigate = useNavigate()
+  const notifications = useQuery({
+    queryKey: ['notifications'],
+    queryFn: () => workspaceApi.listNotifications(),
+  })
+  const markRead = useMutation({
+    mutationFn: (id?: string) => workspaceApi.markNotificationRead(id),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['notifications'] })
+    },
+  })
+  const items = notifications.data?.results.slice(0, 6) ?? []
+  const unread = notifications.data?.unreadCount ?? 0
+
+  const openNotification = (item: AppNotification) => {
+    if (!item.read) markRead.mutate(item.id)
+    setNotificationsOpen(false)
+    if (item.link) navigate(item.link)
+  }
 
   return (
     <TopbarBar>
@@ -74,30 +75,47 @@ export function Topbar({ profile, onOpenMobile }: TopbarProps) {
             onClick={() => setNotificationsOpen((open) => !open)}
           >
             <Bell size={19} />
-            {notificationsRead ? null : <NotificationDot />}
+            {unread > 0 ? <NotificationDot /> : null}
           </NotificationButton>
           {notificationsOpen ? (
             <NotificationPanel>
               <PopoverHeader>
                 <div>
                   <strong>Notifications</strong>
-                  <span>{notificationsRead ? 'All caught up' : '3 unread'}</span>
+                  <span>{unread > 0 ? `${unread} unread` : 'All caught up'}</span>
                 </div>
-                <button onClick={() => setNotificationsRead(true)} type="button">
+                <button
+                  disabled={unread === 0}
+                  onClick={() => markRead.mutate(undefined)}
+                  type="button"
+                >
                   Mark all read
                 </button>
               </PopoverHeader>
               <NotificationList>
-                {notifications.map((notification) => (
-                  <NotificationItem key={notification.title} type="button">
-                    <NotificationItemDot $tone={notification.tone} />
+                {items.length === 0 ? (
+                  <NotificationItem disabled type="button">
                     <span>
-                      <strong>{notification.title}</strong>
-                      <small>{notification.detail}</small>
+                      <strong>No notifications yet</strong>
+                      <small>Ticket, analysis, and knowledge events show up here.</small>
                     </span>
-                    <time>{notification.time}</time>
                   </NotificationItem>
-                ))}
+                ) : (
+                  items.map((notification) => (
+                    <NotificationItem
+                      key={notification.id}
+                      onClick={() => openNotification(notification)}
+                      type="button"
+                    >
+                      <NotificationItemDot $tone={notificationTone(notification.tone)} />
+                      <span>
+                        <strong>{notification.title}</strong>
+                        <small>{notification.detail}</small>
+                      </span>
+                      <time>{formatRelative(notification.createdAt)}</time>
+                    </NotificationItem>
+                  ))
+                )}
               </NotificationList>
               <PopoverFooter to="/notifications">View all notifications</PopoverFooter>
             </NotificationPanel>
@@ -144,4 +162,10 @@ export function Topbar({ profile, onOpenMobile }: TopbarProps) {
       </TopbarActions>
     </TopbarBar>
   )
+}
+
+function notificationTone(tone: AppNotification['tone']) {
+  if (tone === 'knowledge') return 'success'
+  if (tone === 'ai') return 'ai'
+  return 'ticket'
 }

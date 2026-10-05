@@ -45,7 +45,7 @@ PostgreSQL keeps the same vector in a `pgvector` column with an HNSW index (`vec
 
 Unknown tools are ignored. At most four calls run per turn. When a tool returns data, Django writes the reply from that data, including ticket links such as `[FD-1284](/tickets/<uuid>)`. The model does not invent the ticket id.
 
-Conversations are stored per user and workspace. The planner itself only receives the latest assistant reply, capped at 500 characters.
+Conversations are stored per user and workspace. On a follow-up, the planner receives the last eight messages from that conversation, capped at 4,000 characters. The workspace model setting is sent with the plan, so the same choice covers ticket analysis and the agent.
 
 ### Human-in-the-loop
 
@@ -55,7 +55,17 @@ Workspace setting `require_agent_approval` defaults to true. If an admin turns i
 
 ### Multi-tenancy and authorization
 
-Every domain row belongs to an organization. The client sends a JWT and `X-Organization-Id`. Membership roles rank from viewer to agent, admin, and owner. Viewers read. Agents write. Admins delete and change AI settings. Access tokens last 30 minutes. Refresh tokens rotate for 7 days.
+Every domain row belongs to an organization. The client sends a JWT and `X-Organization-Id`. Membership roles rank from viewer to agent, admin, and owner. Viewers read. Agents write. Admins delete, rename the workspace, and change AI settings. Access tokens last 30 minutes. Refresh tokens rotate for 7 days.
+
+### Notifications
+
+Creating a ticket, replying, adding an internal note, finishing an analysis, or indexing a knowledge source writes a notification for every accepted member of that workspace. A failed index is included. A failed analysis is not: the ticket page shows that state on its own. The bell and the notifications page read the same list. Mark as read is stored on the notification.
+
+### Account and workspace
+
+A member can update their name, email, and timezone (`UTC`, `Asia/Yerevan`, or `America/Los_Angeles`) and change their password. Password changes go through Django’s validators. An admin or owner can rename the workspace and its URL. Automatic analysis, approval, and the model stay on the organization and apply to both ticket analysis and the agent planner.
+
+The sidebar counts `AgentAction` rows created this calendar month. There is no quota behind that number.
 
 ## 3. Architecture
 
@@ -81,11 +91,11 @@ In production, nginx serves the built frontend and proxies `/api`, `/admin`, and
 
 ### Frontend
 
-React 18, TypeScript, and Vite. Styled Components for the UI. React Query for server state. The app covers sign-in, a workspace shell, dashboard, tickets, customers, knowledge, the agent, and settings. Ticket search lives on the tickets page.
+React 18, TypeScript, and Vite. Styled Components for the UI. React Query for server state. The app covers sign-in, a workspace shell, dashboard, tickets, customers, knowledge, the agent, notifications, and settings. Ticket search lives on the tickets page.
 
 ### Django API
 
-Django owns authentication, workspace membership, business rules, and persistence: organizations, customers, tickets, comments, tags, knowledge documents and chunks, analyses, agent conversations, and agent actions. Serializers and role checks run before a write. Request logs include a request id, method, path, status, and duration. `/api/v1/health/` checks the process. `/api/v1/ready/` checks PostgreSQL.
+Django owns authentication, workspace membership, business rules, and persistence: organizations, customers, tickets, comments, tags, knowledge documents and chunks, analyses, agent conversations, agent actions, and notifications. Serializers and role checks run before a write. Request logs include a request id, method, path, status, and duration. `/api/v1/health/` checks the process. `/api/v1/ready/` checks PostgreSQL.
 
 ### FastAPI AI service
 
@@ -97,7 +107,7 @@ Relational data lives in PostgreSQL 17. Knowledge chunk embeddings are also stor
 
 ### AI models
 
-With `GEMINI_API_KEY` set, analysis and planning call Gemini (`generateContent` with a JSON schema). Embeddings call `gemini-embedding-001` at 128 dimensions. The default chat model is `gemma-4-26b-a4b-it`. Admins can also select `gemini-3.6-flash` for ticket analysis. That dropdown does not change the agent planner, which uses `GEMINI_MODEL`.
+With `GEMINI_API_KEY` set, analysis and planning call Gemini (`generateContent` with a JSON schema). Embeddings call `gemini-embedding-001` at 128 dimensions. The default chat model is `gemma-4-26b-a4b-it`. Admins can also select `gemini-3.6-flash`. Django sends that workspace choice for ticket analysis and for the agent planner. A stored value outside those two models is sent as `gemma-4-26b-a4b-it`.
 
 With an empty key, analysis uses keyword rules, embeddings use a deterministic hashed bag-of-tokens vector, answers are extractive, and the agent uses a rule planner (`flowdesk-local-agent`). If a Gemini plan or embedding call fails, those paths fall back to the local implementation. Ticket analysis does not: a Gemini failure is stored as a failed analysis.
 
@@ -185,7 +195,8 @@ Approval is the default, not a hard-coded law. The workspace flag exists so an a
 - Retrieval uses pgvector HNSW for candidates and a hybrid cosine plus lexical rank for the final four chunks.
 - The agent planner is constrained to six tools. Django runs the plan and writes replies from tool results.
 - Writes go through a pending `AgentAction`, the existing serializers, and an activity log.
-- Organizations isolate data. Roles gate reads, writes, deletes, and AI settings. JWTs rotate.
+- Organizations isolate data. Roles gate reads, writes, deletes, workspace rename, and AI settings. JWTs rotate.
+- Profile, password, and workspace name persist. Ticket, reply, analysis, and knowledge events become notifications. The sidebar counts this month’s agent actions.
 - Development and production Compose projects are separate. Production refuses a debug flag, a wildcard host list, or a short or placeholder secret.
 - Health and readiness checks, request ids, and GitHub Actions cover the Django suite, the AI-service tests, the frontend, and a PostgreSQL migration job.
 
@@ -239,43 +250,7 @@ Approval is the default, not a hard-coded law. The workspace flag exists so an a
 
 Redis is in both Compose files. Application code does not use it.
 
-## 8. Screenshots / Demo
-
-The repository does not include a curated screenshot set. `frontend/scripts/audit-*.png` are UI audit captures, and several are blank or show an older shell, so they are not used here.
-
-Replace each placeholder with a current capture:
-
-### Dashboard
-
-[image]
-
-### AI ticket analysis
-
-[image]
-
-Open FD-1284. The seeded ticket already has a stored analysis.
-
-### Knowledge base / RAG
-
-[image]
-
-Ask how a customer should export a dataset over 50,000 rows, and show the cited source.
-
-### AI agent
-
-[image]
-
-Ask `Find unresolved export bugs`. Ticket keys in the reply should be links.
-
-### Human approval workflow
-
-[image]
-
-Ask for a ticket change and show the pending action before Approve. A second capture of Cancel is worth including, because nothing is written.
-
-**TODO:** add those five images under something like `docs/screenshots/` and drop the placeholders. The audit PNGs should not be published as the demo.
-
-## 9. Quick start
+## 8. Quick start
 
 You need Docker Desktop with Docker Compose. The first start builds images, migrates, and loads the demo workspace. Later starts reuse that database.
 
@@ -355,7 +330,7 @@ docker compose -f compose.prod.yaml up --build
 
 The app is at http://localhost:8080. Leave `SEED_DEMO` unset for an empty database. Set it to `true` only when you want the demo account.
 
-## 10. Configuration
+## 9. Configuration
 
 Copy `.env.example` to `.env`. Do not commit `.env` or a real API key.
 
@@ -366,16 +341,16 @@ Copy `.env.example` to `.env`. Do not commit `.env` or a real API key.
 | `DJANGO_ALLOWED_HOSTS` | Host allowlist. Production rejects an empty list or `*`. |
 | `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` | Database. Development default password is `flowdesk`. Production requires `POSTGRES_PASSWORD`. |
 | `GEMINI_API_KEY` | Optional. Empty keeps the local models. |
-| `GEMINI_MODEL` | Chat and agent planner model. Default `gemma-4-26b-a4b-it`. |
+| `GEMINI_MODEL` | Default chat model inside the AI service. Default `gemma-4-26b-a4b-it`. Ticket analysis and the agent planner use the workspace model instead. |
 | `GEMINI_EMBEDDING_MODEL` | Default `gemini-embedding-001`. |
 | `WEB_ORIGIN` | Public origin for the production stack. Default `http://localhost:8080`. |
 | `WEB_PORT` | Published nginx port. Default `8080`. |
 | `DJANGO_SECURE_COOKIES` | Set `true` behind TLS. |
 | `SEED_DEMO` | Production only. `true` loads the demo workspace. |
 
-Workspace AI settings are stored on the organization, not in `.env`: automatic analysis (default off), require agent approval (default on), and the analysis model (`gemma-4-26b-a4b-it` or `gemini-3.6-flash`).
+Workspace AI settings are stored on the organization, not in `.env`: automatic analysis (default off), require agent approval (default on), and the model used for analysis and the agent planner (`gemma-4-26b-a4b-it` or `gemini-3.6-flash`).
 
-## 11. Production architecture
+## 10. Production architecture
 
 ```text
 Browser
@@ -396,7 +371,7 @@ Behind TLS, set `WEB_ORIGIN` to the public `https` origin, `DJANGO_ALLOWED_HOSTS
 
 This is a production-oriented layout for a portfolio deployment. It is not a claim that the product is a hosted, operated service.
 
-## 12. API / documentation
+## 11. API / documentation
 
 - Django OpenAPI UI: http://localhost:8000/api/v1/docs/ and `/api/v1/schema/`
 - FastAPI reference: http://localhost:8001/docs
@@ -405,10 +380,13 @@ This is a production-oriented layout for a portfolio deployment. It is not a cla
 
 Where the blueprint and the code disagree, the code is the source of truth. In particular, automatic ticket analysis now defaults to off, and the provider is Gemini.
 
-## 13. Project status
+## 12. Project status
 
 **Implemented**
 
+- Profile, workspace name, and password changes
+- Notifications for new tickets, replies, finished analyses, and knowledge sources
+- Sidebar count of agent actions created this month
 - Workspace auth, registration, and role-based access
 - Customers, tickets, comments, tags, and ticket search
 - Optional ticket analysis and a manual analyze action
@@ -417,26 +395,19 @@ Where the blueprint and the code disagree, the code is the source of truth. In p
 - Workspace AI settings for analysis, approval, and the analysis model
 - Development and production Compose stacks, health checks, and CI
 
-**Present in the UI, not backed by the API**
+**Limits**
 
-- Profile, workspace name, password, two-factor authentication, and the integration buttons show a toast and do not persist
-- Notifications are a fixed sample list
-- The sidebar “AI actions 742 / 1k” meter is static
-- The workspace “Reset data” control clears an old browser copy. It does not reset the server
+- Photo upload, two-factor authentication, and third-party integrations are not in the product
+- Analysis suggestions are stored and shown. They do not change the ticket
 
 **Intentionally out of the request path**
 
 - Redis is reserved in Compose and unused
-- The agent planner does not see the full saved conversation, only the last assistant reply (500 characters)
-- Analysis suggestions are not applied to the ticket
+- The agent planner sees the recent saved conversation (last eight messages), not an unbounded transcript
 
-## 14. Roadmap
+## 13. Roadmap
 
-These are the next pieces that would make the product match its screens. They are not built.
+Nothing in this list is required for the operations loop. Sensible next steps:
 
-- Persist profile, workspace, and security settings, or remove the controls that only toast
-- Drive notifications from ticket, analysis, and knowledge events
-- Send the planner the relevant conversation, not only the last reply
-- Let the workspace model setting apply to the agent planner as well as ticket analysis
-- Replace the static usage meter, or wire it to real `AgentAction` counts
-- Add the screenshots listed in section 8
+- Apply or dismiss analysis suggestions from the ticket page
+- Use Redis for a real job, or drop it from Compose

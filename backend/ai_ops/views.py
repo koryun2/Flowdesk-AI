@@ -18,10 +18,9 @@ class AgentTurnView(APIView):
             raise ValidationError({"message": "Tell the agent what you need."})
         if len(message) > 2000:
             raise ValidationError({"message": "Keep the request under 2000 characters."})
-        prior = str(request.data.get("prior", "")).strip()[:500]
         conversation_id = request.data.get("conversation_id") or None
         return Response(
-            run_turn(request.user, request.membership, message, prior, conversation_id)
+            run_turn(request.user, request.membership, message, "", conversation_id)
         )
 
 

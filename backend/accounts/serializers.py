@@ -24,6 +24,35 @@ class MembershipSerializer(serializers.ModelSerializer):
         fields = ["id", "role", "organization"]
 
 
+TIMEZONES = {"UTC", "Asia/Yerevan", "America/Los_Angeles"}
+
+
+class ProfileUpdateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ["first_name", "last_name", "email", "timezone"]
+
+    def validate_first_name(self, value: str) -> str:
+        name = value.strip()
+        if not name:
+            raise serializers.ValidationError("Enter your name.")
+        return name
+
+    def validate_last_name(self, value: str) -> str:
+        return value.strip()
+
+    def validate_email(self, value: str) -> str:
+        email = value.lower()
+        if User.objects.exclude(pk=self.instance.pk).filter(email=email).exists():
+            raise serializers.ValidationError("An account with this email already exists.")
+        return email
+
+    def validate_timezone(self, value: str) -> str:
+        if value not in TIMEZONES:
+            raise serializers.ValidationError("Choose a timezone.")
+        return value
+
+
 class UserSerializer(serializers.ModelSerializer):
     memberships = serializers.SerializerMethodField()
 

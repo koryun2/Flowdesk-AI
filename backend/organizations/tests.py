@@ -50,3 +50,17 @@ class WorkspaceSettingsTests(APITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_workspace_name_and_usage_are_stored(self):
+        renamed = self.client.patch(
+            reverse("workspace-settings"),
+            {"name": "Flowdesk Labs", "slug": "flowdesk-labs"},
+            format="json",
+        )
+        usage = self.client.get(reverse("workspace-usage"))
+
+        self.organization.refresh_from_db()
+        self.assertEqual(renamed.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.organization.name, "Flowdesk Labs")
+        self.assertEqual(self.organization.slug, "flowdesk-labs")
+        self.assertEqual(usage.data["actions_this_month"], 0)

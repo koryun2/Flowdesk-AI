@@ -331,6 +331,41 @@ class AgentApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(AgentConversation.objects.count(), 0)
 
+    def test_follow_up_sends_saved_messages_and_the_workspace_model(self):
+        self.organization.analysis_model = "gemini-3.6-flash"
+        self.organization.save(update_fields=["analysis_model"])
+        seen = []
+
+        def capture(message, prior="", model=""):
+            seen.append({"message": message, "prior": prior, "model": model})
+            return {
+                "tool_calls": [{"name": "get_customer", "arguments": {"scope": "all"}}],
+                "reply": "",
+                "model_name": model,
+            }
+
+        with patch("ai_ops.agent_service.request_plan", side_effect=capture):
+            first = self.client.post(
+                reverse("agent-turn"),
+                {"message": "How many customers do we have?"},
+                format="json",
+            )
+            self.client.post(
+                reverse("agent-turn"),
+                {
+                    "message": "list the second one",
+                    "conversation_id": first.data["conversation_id"],
+                    "prior": "client prior that should be ignored",
+                },
+                format="json",
+            )
+
+        self.assertEqual(seen[0]["prior"], "")
+        self.assertEqual(seen[0]["model"], "gemini-3.6-flash")
+        self.assertIn("How many customers do we have?", seen[1]["prior"])
+        self.assertNotIn("client prior", seen[1]["prior"])
+        self.assertEqual(seen[1]["model"], "gemini-3.6-flash")
+
     def _plan(self, calls, reply=""):
         return patch(
             "ai_ops.agent_service.request_plan",

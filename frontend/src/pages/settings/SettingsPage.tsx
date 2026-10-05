@@ -1,5 +1,4 @@
 import {
-  Link2,
   ShieldCheck,
   Sparkles,
   UserRound,
@@ -18,7 +17,6 @@ const settingTabs = [
   { id: 'profile', label: 'My profile', icon: UserRound },
   { id: 'workspace', label: 'Workspace', icon: Users },
   { id: 'ai', label: 'AI configuration', icon: Sparkles },
-  { id: 'integrations', label: 'Integrations', icon: Link2 },
   { id: 'security', label: 'Security', icon: ShieldCheck },
 ]
 
@@ -32,7 +30,7 @@ export function SettingsPage() {
     <Page>
       <PageHeader
         title="Settings"
-        description="Manage your profile, workspace, AI behavior, and integrations."
+        description="Manage your profile, workspace, and AI behavior."
       />
       <SettingsLayout>
         <SettingsNav active={active} onChange={setActive} tabs={settingTabs} />

@@ -1,14 +1,15 @@
 from django.db.models import Count, Q
+from django.utils import timezone
+from django.utils.text import slugify
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.permissions import ROLE_RANK, HasMinimumRole, IsOrganizationMember
+from ai_ops.models import AgentAction
 
-from .models import Membership, Organization
-
-ANALYSIS_MODELS = ("gemma-4-26b-a4b-it", "gemini-3.6-flash")
+from .models import ANALYSIS_MODELS, Membership, Organization
 
 OPEN_TICKET_STATUSES = ("new", "investigating", "waiting")
 
@@ -40,6 +41,8 @@ def workspace_settings(organization: Organization) -> dict:
     if model not in ANALYSIS_MODELS:
         model = ANALYSIS_MODELS[0]
     return {
+        "name": organization.name,
+        "slug": organization.slug,
         "auto_analyze_tickets": organization.auto_analyze_tickets,
         "require_agent_approval": organization.require_agent_approval,
         "analysis_model": model,
@@ -75,9 +78,40 @@ class WorkspaceSettingsView(APIView):
                 raise ValidationError({"analysis_model": "Choose a supported analysis model."})
             organization.analysis_model = model
             fields.append("analysis_model")
+        if "name" in request.data:
+            name = str(request.data.get("name") or "").strip()
+            if not 2 <= len(name) <= 160:
+                raise ValidationError({"name": "Enter a workspace name."})
+            organization.name = name
+            fields.append("name")
+        if "slug" in request.data:
+            organization.slug = _workspace_slug(organization, request.data.get("slug"))
+            fields.append("slug")
         if fields:
             organization.save(update_fields=[*fields, "updated_at"])
         return Response(workspace_settings(organization))
+
+
+class WorkspaceUsageView(APIView):
+    permission_classes = [IsAuthenticated, HasMinimumRole]
+
+    def get(self, request):
+        start = timezone.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        count = AgentAction.objects.filter(
+            organization=request.membership.organization,
+            created_at__gte=start,
+        ).count()
+        return Response({"actions_this_month": count})
+
+
+def _workspace_slug(organization: Organization, value) -> str:
+    slug = slugify(str(value or ""))[:80]
+    if len(slug) < 2:
+        raise ValidationError({"slug": "Enter a workspace URL."})
+    taken = Organization.objects.exclude(pk=organization.pk).filter(slug=slug).exists()
+    if taken:
+        raise ValidationError({"slug": "That workspace URL is already in use."})
+    return slug
 
 
 def _bool_setting(value, field: str) -> bool:

@@ -78,6 +78,7 @@ export function CreateTicketModal({
       queryClient.invalidateQueries({ queryKey: ['ticket-summary'] })
       queryClient.invalidateQueries({ queryKey: ['customers'] })
       queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+      queryClient.invalidateQueries({ queryKey: ['notifications'] })
       notify(`${ticket.key} created successfully`)
       reset()
       onClose()

@@ -537,6 +537,16 @@ export const workspaceApi = {
     )
   },
 
+  async renameDocument(id: string, title: string) {
+    return toDocument(
+      await request<ApiDocument>(`/api/v1/documents/${id}/`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title }),
+      }),
+    )
+  },
+
   async askKnowledge(question: string) {
     const answer = await request<{
       answer: string

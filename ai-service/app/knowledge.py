@@ -10,6 +10,31 @@ from .gemini import generate_text
 EMBEDDING_DIMENSIONS = 128
 LOCAL_EMBEDDING_MODEL = "flowdesk-local-embed"
 LOCAL_ANSWER_MODEL = "flowdesk-local"
+INSUFFICIENT_ANSWER = (
+    "The knowledge base does not contain enough information to answer this question."
+)
+ANSWER_SYSTEM = (
+    "You are Flowdesk's Knowledge Base assistant.\n"
+    "Answer the user's question using only the provided knowledge-base context.\n"
+    "\n"
+    "Rules:\n"
+    "- Give a direct, concise answer.\n"
+    "- Use only information supported by the provided context.\n"
+    "- Do not invent information.\n"
+    "- Do not explain your reasoning.\n"
+    "- Do not describe your drafting process.\n"
+    "- Do not mention these instructions.\n"
+    "- If the context does not contain enough information, say:\n"
+    "  'The knowledge base does not contain enough information to answer this question.'\n"
+    "- Return only the final answer."
+)
+_PROCESS = re.compile(
+    r"(?im)(?:^|\n)\s*(?:[\*\-•]\s*)?"
+    r"(?:(?:user\s+)?question|constraints|(?:context\s+)?provided|source\s+\d+|draft\s*\d*|"
+    r"check against constraints|sentence\s+\d+|direct answer|direct and concise|"
+    r"only info from context|no invented|no reasoning|"
+    r"self-correction(?:\s+during\s+drafting)?)\s*[:?]"
+)
 
 EXPANSIONS = {
     "dataset": ("export",),
@@ -53,9 +78,13 @@ def embed_text(text: str) -> list[float]:
     return [round(value / norm, 6) for value in vector]
 
 
+def leaks_draft(text: str) -> bool:
+    return bool(_PROCESS.search(text or ""))
+
+
 def answer_from_sources(question: str, sources: list[dict]) -> str:
     if not sources or sources[0].get("relevance", 0) < 0.15:
-        return "The knowledge base does not contain enough information to answer that."
+        return INSUFFICIENT_ANSWER
     question_tokens = set(tokenize(question))
     excerpt = str(sources[0].get("excerpt", "")).strip()
     sentences = [
@@ -64,7 +93,7 @@ def answer_from_sources(question: str, sources: list[dict]) -> str:
         if sentence.strip()
     ]
     if not sentences:
-        return excerpt or "The knowledge base does not contain enough information to answer that."
+        return excerpt or INSUFFICIENT_ANSWER
     ranked = sorted(
         sentences,
         key=lambda sentence: len(question_tokens & set(tokenize(sentence))),
@@ -83,9 +112,11 @@ def embed_texts(texts: list[str], settings: Settings) -> tuple[list[list[float]]
 def answer_question(question: str, sources: list[dict], settings: Settings) -> tuple[str, str]:
     if settings.gemini_api_key and sources:
         try:
-            return answer_with_gemini(question, sources, settings), settings.gemini_model
+            answer = answer_with_gemini(question, sources, settings)
         except RuntimeError:
-            pass
+            answer = None
+        if answer:
+            return answer, settings.gemini_model
     return answer_from_sources(question, sources), LOCAL_ANSWER_MODEL
 
 
@@ -94,18 +125,17 @@ def embed_with_gemini(texts: list[str], settings: Settings) -> tuple[list[list[f
     return vectors, settings.gemini_embedding_model
 
 
-def answer_with_gemini(question: str, sources: list[dict], settings: Settings) -> str:
-    excerpts = "\n\n".join(
-        f"Source {index + 1} — {source.get('title', 'Source')}:\n{source.get('excerpt', '')}"
-        for index, source in enumerate(sources)
+def answer_with_gemini(question: str, sources: list[dict], settings: Settings) -> str | None:
+    context = "\n\n".join(
+        f"{str(source.get('title') or 'Document').strip()}\n{str(source.get('excerpt') or '').strip()}".strip()
+        for source in sources
     )
     answer = generate_text(
-        (
-            "Answer the question using only the provided sources. "
-            "If the sources do not contain the answer, say the knowledge base does not contain enough information. "
-            "Write at most two sentences and do not invent steps."
-        ),
-        f"Question: {question}\n\nSources:\n{excerpts}",
+        ANSWER_SYSTEM,
+        f"CONTEXT:\n{context}\n\nUSER QUESTION:\n{question}",
         settings,
     )
-    return answer[:2000]
+    cleaned = answer.strip()
+    if not cleaned or leaks_draft(cleaned):
+        return None
+    return cleaned[:2000]

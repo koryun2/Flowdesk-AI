@@ -16,6 +16,7 @@ from .services import (
     fetch_url_text,
     index_document,
     prepare_document,
+    rename_document,
 )
 
 
@@ -121,7 +122,7 @@ class KnowledgeDocumentSerializer(serializers.ModelSerializer):
 class KnowledgeDocumentViewSet(viewsets.ModelViewSet):
     serializer_class = KnowledgeDocumentSerializer
     parser_classes = [JSONParser, MultiPartParser, FormParser]
-    http_method_names = ["get", "post", "delete", "head", "options"]
+    http_method_names = ["get", "post", "patch", "delete", "head", "options"]
 
     def get_permissions(self):
         if self.action in {"list", "retrieve", "ask", "summary"}:
@@ -166,6 +167,26 @@ class KnowledgeDocumentViewSet(viewsets.ModelViewSet):
                 "status": document.status,
             },
         )
+
+    def partial_update(self, request, *args, **kwargs):
+        document = self.get_object()
+        if set(request.data.keys()) - {"title"}:
+            raise serializers.ValidationError({"title": "Only the title can be changed."})
+        title = request.data.get("title")
+        if not isinstance(title, str):
+            raise serializers.ValidationError({"title": "Enter a title."})
+        previous = document.title
+        rename_document(document, title)
+        if document.title != previous:
+            record_activity(
+                organization=document.organization,
+                actor=request.user,
+                action="renamed document",
+                entity_type=ActivityLog.EntityType.KNOWLEDGE_DOCUMENT,
+                entity_id=document.id,
+                context={"detail": document.title},
+            )
+        return Response(self.get_serializer(document).data)
 
     def perform_destroy(self, instance):
         organization = instance.organization

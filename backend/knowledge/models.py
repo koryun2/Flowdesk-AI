@@ -100,6 +100,7 @@ class KnowledgeChunk(TimeStampedUUIDModel):
         related_name="chunks",
     )
     position = models.PositiveIntegerField()
+    section = models.CharField(max_length=40, blank=True, default="")
     content = models.TextField()
     embedding = models.JSONField(default=list, blank=True)
     embedding_model = models.CharField(max_length=120)
@@ -120,6 +121,10 @@ class KnowledgeChunk(TimeStampedUUIDModel):
             models.Index(
                 fields=["document", "position"],
                 name="chunk_document_position_idx",
+            ),
+            models.Index(
+                fields=["organization", "section"],
+                name="chunk_org_section_idx",
             ),
         ]
 

@@ -60,6 +60,215 @@ class KnowledgeApiTests(APITestCase):
         self.assertEqual(answer.data["sources"][0]["title"], "Export limits and large dataset guide")
         self.assertGreater(answer.data["sources"][0]["relevance"], 0.15)
 
+    def test_chunks_from_one_document_are_cited_once(self):
+        paragraph = (
+            "Koryun Hayryan builds TypeScript interfaces for the support workspace "
+            "and lists React with PostgreSQL. "
+        )
+        created = self.client.post(
+            reverse("document-list"),
+            {
+                "title": "Resume",
+                "source_type": "text",
+                "content": (paragraph + "\n") * 8,
+            },
+            format="json",
+        )
+        other = self.client.post(
+            reverse("document-list"),
+            {
+                "title": "Billing and subscription FAQ",
+                "source_type": "text",
+                "content": (
+                    "Invoices are billed monthly. Customers download invoices from the billing page."
+                ),
+            },
+            format="json",
+        )
+        answer = self.client.post(
+            reverse("document-ask"),
+            {"question": "What does Koryun Hayryan build with TypeScript?"},
+            format="json",
+        )
+        both = self.client.post(
+            reverse("document-ask"),
+            {"question": "What TypeScript work does Koryun Hayryan list, and where do customers download invoices?"},
+            format="json",
+        )
+
+        self.assertGreaterEqual(created.data["chunk_count"], 2)
+        self.assertEqual(answer.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(answer.data["sources"]), 1)
+        self.assertEqual(answer.data["sources"][0]["document_id"], created.data["id"])
+        self.assertEqual(answer.data["sources"][0]["title"], "Resume")
+        titles = {source["title"] for source in both.data["sources"]}
+        self.assertIn("Billing and subscription FAQ", titles)
+        self.assertEqual(len(titles), len(both.data["sources"]))
+        self.assertNotEqual(other.data["id"], created.data["id"])
+
+    def test_section_questions_use_that_section_without_the_model(self):
+        created = self.client.post(
+            reverse("document-list"),
+            {
+                "title": "Resume",
+                "source_type": "text",
+                "content": (
+                    "Koryun Hayryan\n"
+                    "Software Developer\n"
+                    "PROFILE\n"
+                    "Support tools developer.\n"
+                    "TECHNICAL SKILLS\n"
+                    "TypeScript, React, and PostgreSQL.\n"
+                    "WORK EXPERIENCE\n"
+                    "Frontend Developer at Example Studio.\n"
+                    "EDUCATION\n"
+                    "Bachelor's Degree in Economics Yerevan State University\n"
+                    "ADDITIONAL TRAINING\n"
+                    "Python and Django coursework.\n"
+                ),
+            },
+            format="json",
+        )
+        from knowledge.models import KnowledgeChunk
+
+        sections = set(
+            KnowledgeChunk.objects.filter(document_id=created.data["id"]).values_list(
+                "section", flat=True
+            )
+        )
+        with patch(
+            "knowledge.services.request_answer",
+            side_effect=AssertionError("section lookup should not call the model"),
+        ):
+            education = self.client.post(
+                reverse("document-ask"),
+                {"question": "What is Koryun Hayryan's education?"},
+                format="json",
+            )
+            experience = self.client.post(
+                reverse("document-ask"),
+                {"question": "What is Koryun Hayryan's professional experience?"},
+                format="json",
+            )
+        with patch(
+            "knowledge.services.request_answer",
+            return_value=("His degree supports the frontend work.", "gemma-4-26b-a4b-it"),
+        ) as synthesized:
+            complex_question = self.client.post(
+                reverse("document-ask"),
+                {
+                    "question": "How does Koryun Hayryan's experience complement his education?",
+                },
+                format="json",
+            )
+
+        self.assertEqual(created.status_code, status.HTTP_201_CREATED)
+        self.assertIn("education", sections)
+        self.assertIn("experience", sections)
+        self.assertEqual(education.status_code, status.HTTP_200_OK)
+        self.assertIn("Yerevan State University", education.data["answer"])
+        self.assertNotIn("Frontend Developer", education.data["answer"])
+        self.assertEqual(len(education.data["sources"]), 1)
+        self.assertEqual(experience.status_code, status.HTTP_200_OK)
+        self.assertIn("Frontend Developer", experience.data["answer"])
+        self.assertNotIn("Yerevan State University", experience.data["answer"])
+        self.assertEqual(complex_question.status_code, status.HTTP_200_OK)
+        self.assertEqual(complex_question.data["answer"], "His degree supports the frontend work.")
+        excerpts = " ".join(source["excerpt"] for source in synthesized.call_args.args[1])
+        self.assertIn("Frontend Developer", excerpts)
+        self.assertIn("Yerevan State University", excerpts)
+        self.assertEqual(len(complex_question.data["sources"]), 1)
+
+    def test_source_title_can_be_renamed_without_reindexing(self):
+        created = self.client.post(
+            reverse("document-list"),
+            {
+                "title": "Export limits and large dataset guide",
+                "source_type": "text",
+                "content": EXPORT_GUIDE,
+            },
+            format="json",
+        )
+        from knowledge.models import KnowledgeChunk
+
+        before = list(
+            KnowledgeChunk.objects.filter(document_id=created.data["id"]).values_list(
+                "content", flat=True
+            )
+        )
+        renamed = self.client.patch(
+            reverse("document-detail", args=[created.data["id"]]),
+            {"title": "Large export guide"},
+            format="json",
+        )
+        short = self.client.patch(
+            reverse("document-detail", args=[created.data["id"]]),
+            {"title": "No"},
+            format="json",
+        )
+        viewer_client, viewer, _organization = workspace(
+            role=Membership.Role.VIEWER,
+            email="rename-viewer@example.com",
+            slug="rename-viewer",
+        )
+        Membership.objects.filter(user=viewer).update(organization=self.organization)
+        forbidden = viewer_client.patch(
+            reverse("document-detail", args=[created.data["id"]]),
+            {"title": "Viewer rename"},
+            format="json",
+        )
+        after = list(
+            KnowledgeChunk.objects.filter(document_id=created.data["id"]).values_list(
+                "content", flat=True
+            )
+        )
+
+        self.assertEqual(renamed.status_code, status.HTTP_200_OK)
+        self.assertEqual(renamed.data["title"], "Large export guide")
+        self.assertEqual(renamed.data["chunk_count"], created.data["chunk_count"])
+        self.assertEqual(before, after)
+        self.assertEqual(short.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(forbidden.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_drafting_text_is_not_returned_with_the_citation(self):
+        self.client.post(
+            reverse("document-list"),
+            {
+                "title": "export-limits.md",
+                "source_type": "text",
+                "content": EXPORT_GUIDE,
+            },
+            format="json",
+        )
+        draft = (
+            "* Question: How do exports work?\n"
+            "* Constraints: Use only the sources.\n"
+            "* Draft 1: Invent a new export step.\n"
+            "* Check against constraints: Looks fine.\n"
+            "* Self-Correction during drafting: Kept the invented step.\n"
+        )
+        with patch(
+            "knowledge.services.request_answer",
+            return_value=(draft, "gemma-4-26b-a4b-it"),
+        ):
+            answer = self.client.post(
+                reverse("document-ask"),
+                {"question": "How should customers export datasets over 50,000 rows?"},
+                format="json",
+            )
+
+        self.assertEqual(answer.status_code, status.HTTP_200_OK)
+        self.assertNotIn("Draft", answer.data["answer"])
+        self.assertNotIn("Self-Correction", answer.data["answer"])
+        self.assertNotIn("Check against constraints", answer.data["answer"])
+        self.assertIn("24 hours", answer.data["answer"])
+        source = answer.data["sources"][0]
+        self.assertEqual(source["title"], "export-limits.md")
+        self.assertIn("document_id", source)
+        self.assertIn("excerpt", source)
+        self.assertGreater(source["relevance"], 0.15)
+        self.assertNotIn("answer", source)
+
     def test_duplicate_content_private_urls_and_workspace_isolation(self):
         payload = {
             "title": "Roles",

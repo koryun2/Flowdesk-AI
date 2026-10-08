@@ -16,12 +16,20 @@ from rest_framework import serializers
 from .client import KnowledgeAIError, request_answer, request_embeddings
 from .local_ai import (
     EMBEDDING_DIMENSIONS,
+    INSUFFICIENT_ANSWER,
     LOCAL_ANSWER_MODEL,
     LOCAL_EMBEDDING_MODEL,
+    SECTION_BOOST,
     answer_from_sources,
-    chunk_text,
+    chunk_document,
+    detect_sections,
     embed_text,
     hybrid_score,
+    is_complex_question,
+    leaks_draft,
+    section_answer,
+    specific_tokens,
+    tokenize,
 )
 from .models import KnowledgeChunk, KnowledgeDocument
 from .vectors import nearest_chunk_ids, write_vectors
@@ -33,6 +41,7 @@ MAX_DOCUMENT_CHARS = 60_000
 MAX_CHUNKS = 80
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024
 MIN_RELEVANCE = 0.15
+MAX_CONTEXT_CHUNKS = 3
 TEXT_EXTENSIONS = {".txt", ".md", ".markdown"}
 
 
@@ -41,21 +50,22 @@ def index_document(document: KnowledgeDocument, *, remote: bool = True) -> Knowl
     document.error_message = ""
     document.save(update_fields=["status", "error_message", "updated_at"])
     try:
-        pieces = chunk_text(document.content)[:MAX_CHUNKS]
+        pieces = chunk_document(document.content)[:MAX_CHUNKS]
         if not pieces:
             raise ValueError("The document has no readable text.")
-        vectors, model_name = embed_document(pieces, remote=remote)
+        vectors, model_name = embed_document([content for _section, content in pieces], remote=remote)
         chunks = [
             KnowledgeChunk(
                 id=uuid4(),
                 organization=document.organization,
                 document=document,
                 position=position,
-                content=piece,
+                section=section,
+                content=content,
                 embedding=vector,
                 embedding_model=model_name,
             )
-            for position, (piece, vector) in enumerate(zip(pieces, vectors))
+            for position, ((section, content), vector) in enumerate(zip(pieces, vectors))
         ]
         with transaction.atomic():
             document.chunks.all().delete()
@@ -84,25 +94,25 @@ def answer_question(organization, question: str) -> dict:
     if not matches and model_name != LOCAL_EMBEDDING_MODEL:
         vector = embed_text(question)
         matches = ranked_chunks(organization, question, vector, LOCAL_EMBEDDING_MODEL)
-    sources = [
-        {
-            "document_id": str(chunk.document_id),
-            "title": chunk.document.title,
-            "excerpt": chunk.content[:500],
-            "relevance": score,
-        }
-        for score, chunk in matches
-    ]
+    hints = detect_sections(question)
+    if len(hints) == 1 and not is_complex_question(question):
+        direct = direct_section_answer(organization, question, hints[0], vector, model_name)
+        if direct:
+            return direct
+    contexts = context_sources(matches)
+    sources = cited_sources(matches)
     if not sources:
         return {
-            "answer": "The knowledge base does not contain enough information to answer that.",
+            "answer": INSUFFICIENT_ANSWER,
             "sources": [],
             "model_name": LOCAL_ANSWER_MODEL,
         }
     try:
-        answer, answer_model = request_answer(question, sources)
+        answer, answer_model = request_answer(question, contexts)
     except KnowledgeAIError:
-        answer, answer_model = answer_from_sources(question, sources), LOCAL_ANSWER_MODEL
+        answer, answer_model = answer_from_sources(question, contexts), LOCAL_ANSWER_MODEL
+    if leaks_draft(answer):
+        answer = answer_from_sources(question, contexts)
     return {"answer": answer, "sources": sources, "model_name": answer_model}
 
 
@@ -156,32 +166,133 @@ def embed_query(question: str) -> tuple[list[float], str]:
         return embed_text(question), LOCAL_EMBEDDING_MODEL
 
 
+def context_sources(matches) -> list[dict]:
+    return [
+        {
+            "document_id": str(chunk.document_id),
+            "title": chunk.document.title,
+            "excerpt": chunk.content[:500],
+            "relevance": score,
+        }
+        for score, chunk in matches
+    ]
+
+
+def cited_sources(matches) -> list[dict]:
+    sources = []
+    for source in context_sources(matches):
+        current = next((item for item in sources if item["document_id"] == source["document_id"]), None)
+        if current is None:
+            sources.append(dict(source))
+            continue
+        if source["excerpt"] not in current["excerpt"]:
+            current["excerpt"] = f"{current['excerpt']}\n\n{source['excerpt']}"[:500]
+    return sources
+
+
+def direct_section_answer(organization, question: str, section: str, vector: list[float], model_name: str):
+    chunks = list(
+        KnowledgeChunk.objects.filter(
+            organization=organization,
+            section=section,
+            embedding_model=model_name,
+            document__status=KnowledgeDocument.Status.READY,
+        ).select_related("document")
+    )
+    if not chunks:
+        return None
+    grouped: dict = {}
+    for chunk in chunks:
+        grouped.setdefault(chunk.document_id, []).append(chunk)
+    specific = specific_tokens(question, section)
+    ranked = []
+    for parts in grouped.values():
+        document = parts[0].document
+        overlap = len(specific & set(tokenize(document.content[:8000]))) if specific else 1
+        best = 0.0
+        for chunk in parts:
+            embedding = chunk.embedding if isinstance(chunk.embedding, list) else []
+            if len(embedding) == len(vector):
+                best = max(best, hybrid_score(question, chunk.content, vector, embedding))
+        ranked.append((overlap, best, document, parts))
+    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    overlap, score, document, parts = ranked[0]
+    if specific and overlap == 0:
+        return None
+    parts.sort(key=lambda chunk: chunk.position)
+    answer = section_answer([chunk.content for chunk in parts])
+    if not answer:
+        return None
+    return {
+        "answer": answer,
+        "sources": [
+            {
+                "document_id": str(document.id),
+                "title": document.title,
+                "excerpt": parts[0].content[:500],
+                "relevance": min(1.0, round(score + SECTION_BOOST, 4)),
+            }
+        ],
+        "model_name": LOCAL_ANSWER_MODEL,
+    }
+
+
 def ranked_chunks(organization, question: str, vector: list[float], model_name: str):
-    queryset = KnowledgeChunk.objects.filter(
+    hints = set(detect_sections(question))
+    base = KnowledgeChunk.objects.filter(
         organization=organization,
         embedding_model=model_name,
         document__status=KnowledgeDocument.Status.READY,
     ).select_related("document")
+    pool = {}
     candidate_ids = nearest_chunk_ids(organization.id, vector, model_name)
-    if candidate_ids:
-        queryset = queryset.filter(id__in=candidate_ids)
+    candidates = base.filter(id__in=candidate_ids) if candidate_ids else base
+    for chunk in candidates:
+        pool[chunk.id] = chunk
+    if hints:
+        for chunk in base.filter(section__in=hints):
+            pool[chunk.id] = chunk
     scored = []
-    for chunk in queryset:
+    for chunk in pool.values():
         embedding = chunk.embedding
         if not isinstance(embedding, list) or len(embedding) != len(vector):
             continue
         score = hybrid_score(question, chunk.content, vector, embedding)
+        if chunk.section in hints:
+            score = min(1.0, round(score + SECTION_BOOST, 4))
         if score >= MIN_RELEVANCE:
             scored.append((score, chunk))
-    scored.sort(key=lambda item: item[0], reverse=True)
-    return scored[:4]
+    best = {}
+    for score, chunk in scored:
+        key = (chunk.document_id, chunk.section or "")
+        current = best.get(key)
+        if current is None or score > current[0]:
+            best[key] = (score, chunk)
+    ranked = sorted(best.values(), key=lambda item: item[0], reverse=True)
+    return ranked[:MAX_CONTEXT_CHUNKS]
 
 
-def unique_slug(organization, title: str) -> str:
+def rename_document(document: KnowledgeDocument, title: str) -> KnowledgeDocument:
+    cleaned = title.strip()
+    if not 3 <= len(cleaned) <= 240:
+        raise serializers.ValidationError({"title": "Enter a title between 3 and 240 characters."})
+    if cleaned == document.title:
+        return document
+    document.title = cleaned
+    document.slug = unique_slug(document.organization, cleaned, exclude=document.pk)
+    document.save(update_fields=["title", "slug", "updated_at"])
+    return document
+
+
+def unique_slug(organization, title: str, *, exclude=None) -> str:
     base = slugify(title)[:100] or "document"
     slug = base
     suffix = 2
-    while KnowledgeDocument.objects.filter(organization=organization, slug=slug).exists():
+    while (
+        KnowledgeDocument.objects.filter(organization=organization, slug=slug)
+        .exclude(pk=exclude)
+        .exists()
+    ):
         slug = f"{base[:90]}-{suffix}"
         suffix += 1
     return slug

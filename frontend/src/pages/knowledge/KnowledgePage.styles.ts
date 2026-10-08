@@ -324,6 +324,28 @@ export const DocumentIcon = styled.span<{ $sourceType: KnowledgeDocument['source
         : theme.primarySoft};
 `
 
+export const TitleButton = styled.button`
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 10px;
+  font-weight: 700;
+  text-align: left;
+`
+
+export const TitleInput = styled.input`
+  width: 100%;
+  padding: 0 0 2px;
+  border: 0;
+  border-bottom: 1px solid ${({ theme }) => theme.primary};
+  background: transparent;
+  color: inherit;
+  font-size: 10px;
+  font-weight: 700;
+  outline: none;
+`
+
 export const DocumentCol = styled.div`
   display: flex;
   min-width: 0;

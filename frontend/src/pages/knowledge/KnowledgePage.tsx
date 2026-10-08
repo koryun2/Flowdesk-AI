@@ -3,6 +3,7 @@ import { BookOpenCheck, CheckCircle2, Plus, Sparkles } from 'lucide-react'
 import { useState } from 'react'
 import type { FormEvent } from 'react'
 import { Button, Page, PageHeader } from '../../components/ui'
+import { useAuth } from '../../providers/auth-context'
 import { useToast } from '../../providers/toast'
 import { workspaceApi } from '../../services/workspaceApi'
 import { AddSourceForm } from './AddSourceForm'
@@ -12,6 +13,8 @@ import { KnowledgeStats, StatCard } from './KnowledgePage.styles'
 
 export function KnowledgePage() {
   const { notify } = useToast()
+  const { user } = useAuth()
+  const canEdit = user?.memberships[0]?.role !== 'viewer'
   const [search, setSearch] = useState('')
   const [addOpen, setAddOpen] = useState(false)
   const [question, setQuestion] = useState('')
@@ -93,6 +96,7 @@ export function KnowledgePage() {
       />
 
       <KnowledgeLibrary
+        canEdit={canEdit}
         documents={documents}
         isError={isError}
         isLoading={isLoading}

@@ -26,9 +26,17 @@ Automatic analysis is off until an admin enables it. Anyone can still run Analyz
 
 ### RAG knowledge base
 
-A source can be pasted text, a `.txt`, `.md`, `.pdf`, or `.docx` upload (8 MB), or a public `http`/`https` URL. Private and loopback addresses are rejected. Django extracts the text, splits it into overlapping chunks (about 700 characters, 100-character overlap, at most 80 chunks), and stores a 128-dimension embedding on each chunk.
+A source can be pasted text, a `.txt`, `.md`, `.pdf`, or `.docx` upload (8 MB), or a public `http`/`https` URL. Private and loopback addresses are rejected. Django extracts the text and stores a 128-dimension embedding on each chunk. An agent or admin can rename a source. That change updates the title only and does not reindex the text. Viewers cannot rename it.
 
-PostgreSQL keeps the same vector in a `pgvector` column with an HNSW index (`vector_cosine_ops`). A question is embedded, the nearest chunks for that workspace and embedding model are loaded (up to 30), then re-ranked in Django: `0.35` cosine similarity and `0.65` lexical overlap. The top four chunks above `0.15` relevance are sent to the answer step. The API returns the answer and the source titles. If the sources are too weak, the answer says the knowledge base does not contain enough information.
+A document with at least two headings, such as `EDUCATION` or `WORK EXPERIENCE`, is split on those headings. Each chunk keeps a section label (`education`, `experience`, `skills`, `projects`, `profile`, `training`, or the heading itself). A long section is split further, still under the same label. A document without those headings is split into overlapping chunks of about 700 characters, with 100 characters of overlap, up to 80 chunks, and those chunks have no section label.
+
+PostgreSQL keeps the same vector in a `pgvector` column with an HNSW index (`vector_cosine_ops`). A question is embedded, the nearest chunks for that workspace and embedding model are loaded (up to 30), then re-ranked in Django: `0.35` cosine similarity and `0.65` lexical overlap. A section named in the question gets an extra `0.45` and is included even when it was outside the nearest 30. Chunks below `0.15` are dropped. The rank keeps the best chunk for each document and section, then the top three.
+
+A direct question about one section is answered from that section’s text. Gemini is not called. A question that compares sections, or asks how or why, sends those top chunks to the model. Either way the response lists each document once, with its title, excerpt, and relevance. If nothing is relevant enough, the answer is: “The knowledge base does not contain enough information to answer this question.”
+
+![Education question answered from the Resume source](docs/screenshots/knowledge-education.png)
+
+![Experience question answered from the same Resume source](docs/screenshots/knowledge-experience.png)
 
 ### AI operations agent
 
@@ -109,7 +117,7 @@ Relational data lives in PostgreSQL 17. Knowledge chunk embeddings are also stor
 
 With `GEMINI_API_KEY` set, analysis and planning call Gemini (`generateContent` with a JSON schema). Embeddings call `gemini-embedding-001` at 128 dimensions. The default chat model is `gemma-4-26b-a4b-it`. Admins can also select `gemini-3.6-flash`. Django sends that workspace choice for ticket analysis and for the agent planner. A stored value outside those two models is sent as `gemma-4-26b-a4b-it`.
 
-With an empty key, analysis uses keyword rules, embeddings use a deterministic hashed bag-of-tokens vector, answers are extractive, and the agent uses a rule planner (`flowdesk-local-agent`). If a Gemini plan or embedding call fails, those paths fall back to the local implementation. Ticket analysis does not: a Gemini failure is stored as a failed analysis.
+With an empty key, analysis uses keyword rules, embeddings use a deterministic hashed bag-of-tokens vector, answers are extractive, and the agent uses a rule planner (`flowdesk-local-agent`). If a Gemini plan or embedding call fails, those paths fall back to the local implementation. Ticket analysis does not: a Gemini failure is stored as a failed analysis. A simple section lookup stays extractive even when a key is set, so that question does not spend a generation call.
 
 ## 4. AI architecture
 
@@ -132,16 +140,18 @@ Structured output keeps the model inside an enum and a schema. Django can store 
 ```text
 Document or URL
         →  text extraction, private-URL rejection
-        →  chunking
+        →  section split when the document has headings, otherwise size-based chunks
         →  128-d embedding (Gemini or local)
         →  PostgreSQL + pgvector HNSW
-        →  cosine candidate search, scoped to the workspace
-        →  hybrid rank (0.35 cosine, 0.65 lexical overlap)
-        →  answer from those chunks only
-        →  answer + sources
+        →  cosine candidates, plus any chunk in a named section
+        →  hybrid rank (0.35 cosine, 0.65 lexical) and a 0.45 section boost
+        →  best chunk per document and section, top three
+        →  one section: return that text
+        →  a comparison or a how/why question: Gemini, then discard a draft
+        →  one citation per document
 ```
 
-The answer prompt tells the model to use only the retrieved excerpts and to say when they are not enough. Seeded documents can be indexed with the local embedding so the database can start before the AI service is listening.
+The answer prompt asks for the final answer only. A reply that contains a draft, a constraint check, or a self-correction is discarded and replaced with the matching source sentences. Citations stay on the source list, beside the answer. Seeded documents can be indexed with the local embedding so the database can start before the AI service is listening.
 
 ### Agent and tool-calling pipeline
 
@@ -191,8 +201,8 @@ Approval is the default, not a hard-coded law. The workspace flag exists so an a
 
 - Split inference from authority: FastAPI returns structured results, Django persists them.
 - Ticket analysis uses a JSON schema and Pydantic models, with a local classifier when no API key is set.
-- Knowledge ingestion covers text, PDF, Word, and public URLs, with chunking and a checksum so the same content is not indexed twice.
-- Retrieval uses pgvector HNSW for candidates and a hybrid cosine plus lexical rank for the final four chunks.
+- Knowledge ingestion covers text, PDF, Word, and public URLs, with section-aware chunking and a checksum so the same content is not indexed twice. A title rename does not reindex.
+- Retrieval uses pgvector HNSW for candidates, a hybrid cosine plus lexical rank, and a section match. A single-section question is answered from that section. Each document is cited once.
 - The agent planner is constrained to six tools. Django runs the plan and writes replies from tool results.
 - Writes go through a pending `AgentAction`, the existing serializers, and an activity log.
 - Organizations isolate data. Roles gate reads, writes, deletes, workspace rename, and AI settings. JWTs rotate.
@@ -390,7 +400,7 @@ Where the blueprint and the code disagree, the code is the source of truth. In p
 - Workspace auth, registration, and role-based access
 - Customers, tickets, comments, tags, and ticket search
 - Optional ticket analysis and a manual analyze action
-- Knowledge ingestion, pgvector retrieval, hybrid ranking, and source-cited answers
+- Knowledge ingestion, section-aware retrieval, source titles, and one citation per document
 - Agent planning, immediate reads, approval-gated writes, and saved conversations
 - Workspace AI settings for analysis, approval, and the analysis model
 - Development and production Compose stacks, health checks, and CI

@@ -1,12 +1,15 @@
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   CheckCircle2,
   Clock3,
   FileText,
   Link2,
-  MoreHorizontal,
+  Pencil,
   Plus,
   Search,
 } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import type { KeyboardEvent } from 'react'
 import {
   Button,
   EmptyState,
@@ -15,6 +18,9 @@ import {
   Skeleton,
 } from '../../components/ui'
 import { formatRelative } from '../../lib/utils'
+import { useToast } from '../../providers/toast'
+import { ApiError } from '../../services/authApi'
+import { workspaceApi } from '../../services/workspaceApi'
 import type { KnowledgeDocument } from '../../types'
 import {
   DocumentChunks,
@@ -26,6 +32,8 @@ import {
   DocumentStatusWrap,
   DocumentUpdated,
   LibraryCard,
+  TitleButton,
+  TitleInput,
   LibraryHeader,
   TableSearch,
   TableSkeleton,
@@ -39,6 +47,7 @@ type KnowledgeLibraryProps = {
   isError: boolean
   onRetry: () => void
   onAddSource: () => void
+  canEdit: boolean
 }
 
 export function KnowledgeLibrary({
@@ -49,7 +58,10 @@ export function KnowledgeLibrary({
   isError,
   onRetry,
   onAddSource,
+  canEdit,
 }: KnowledgeLibraryProps) {
+  const [editingId, setEditingId] = useState<string | null>(null)
+
   return (
     <LibraryCard>
       <LibraryHeader>
@@ -92,7 +104,13 @@ export function KnowledgeLibrary({
                 )}
               </DocumentIcon>
               <DocumentCol>
-                <strong>{document.title}</strong>
+                <SourceTitle
+                  canEdit={canEdit}
+                  document={document}
+                  editing={editingId === document.id}
+                  onDone={() => setEditingId(null)}
+                  onEdit={() => setEditingId(document.id)}
+                />
                 <small>
                   {document.status === 'failed' && document.errorMessage
                     ? document.errorMessage
@@ -117,9 +135,14 @@ export function KnowledgeLibrary({
                 <strong>{formatRelative(document.updatedAt)}</strong>
                 <small>by {document.createdBy}</small>
               </DocumentUpdated>
-              <IconButton label={`Actions for ${document.title}`}>
-                <MoreHorizontal size={17} />
-              </IconButton>
+              {canEdit ? (
+                <IconButton
+                  label={`Rename ${document.title}`}
+                  onClick={() => setEditingId(document.id)}
+                >
+                  <Pencil size={17} />
+                </IconButton>
+              ) : null}
             </DocumentRow>
           ))}
         </DocumentList>
@@ -135,5 +158,98 @@ export function KnowledgeLibrary({
         />
       )}
     </LibraryCard>
+  )
+}
+
+function SourceTitle({
+  document,
+  canEdit,
+  editing,
+  onEdit,
+  onDone,
+}: {
+  document: KnowledgeDocument
+  canEdit: boolean
+  editing: boolean
+  onEdit: () => void
+  onDone: () => void
+}) {
+  const { notify } = useToast()
+  const queryClient = useQueryClient()
+  const [title, setTitle] = useState(document.title)
+  const saving = useRef(false)
+  const skipBlur = useRef(false)
+  const save = useMutation({
+    mutationFn: (next: string) => workspaceApi.renameDocument(document.id, next),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['documents'] })
+      notify('Source title saved')
+      onDone()
+    },
+    onError: (error) => {
+      const message =
+        error instanceof ApiError
+          ? Object.values(error.fieldErrors)[0] || error.message
+          : 'The title was not saved'
+      notify(message, 'error')
+    },
+  })
+
+  useEffect(() => {
+    if (!editing) setTitle(document.title)
+  }, [document.title, editing])
+
+  const commit = () => {
+    if (skipBlur.current) {
+      skipBlur.current = false
+      return
+    }
+    if (saving.current) return
+    const next = title.trim()
+    if (!next || next === document.title) {
+      setTitle(document.title)
+      onDone()
+      return
+    }
+    saving.current = true
+    save.mutate(next, {
+      onSettled: () => {
+        saving.current = false
+      },
+    })
+  }
+
+  const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      commit()
+    }
+    if (event.key === 'Escape') {
+      skipBlur.current = true
+      setTitle(document.title)
+      onDone()
+    }
+  }
+
+  if (editing) {
+    return (
+      <TitleInput
+        aria-label={`Title for ${document.title}`}
+        autoFocus
+        disabled={save.isPending}
+        onBlur={commit}
+        onChange={(event) => setTitle(event.target.value)}
+        onKeyDown={onKeyDown}
+        value={title}
+      />
+    )
+  }
+
+  if (!canEdit) return <strong>{document.title}</strong>
+
+  return (
+    <TitleButton onClick={onEdit} type="button">
+      {document.title}
+    </TitleButton>
   )
 }

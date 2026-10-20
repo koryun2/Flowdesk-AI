@@ -196,6 +196,18 @@ export interface WorkspaceUsage {
   actionsThisMonth: number
 }
 
+export interface RedisJob {
+  id: string
+  task: string
+  status: string
+  label: string
+}
+
+export interface RedisQueue {
+  queued: number
+  jobs: RedisJob[]
+}
+
 export interface AppNotification {
   id: string
   title: string
@@ -390,8 +402,11 @@ export const workspaceApi = {
   },
 
   async analyzeTicket(id: string) {
-    const ticket = await request<ApiTicket>(`/api/v1/tickets/${id}/analyze/`, { method: 'POST' })
-    return toTicket(ticket)
+    const ticket = await request<ApiTicket & { analysis_pending?: boolean }>(
+      `/api/v1/tickets/${id}/analyze/`,
+      { method: 'POST' },
+    )
+    return { ticket: toTicket(ticket), analysisPending: Boolean(ticket.analysis_pending) }
   },
 
   async applySuggestedTag(ticket: Ticket, name: string) {
@@ -704,6 +719,10 @@ export const workspaceApi = {
   async getWorkspaceUsage() {
     const usage = await request<{ actions_this_month: number }>('/api/v1/workspace/usage/')
     return { actionsThisMonth: usage.actions_this_month }
+  },
+
+  async listJobs() {
+    return request<RedisQueue>('/api/v1/workspace/jobs/')
   },
 
   async listNotifications() {

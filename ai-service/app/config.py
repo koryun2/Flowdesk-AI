@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     gemini_model: str = "gemma-4-26b-a4b-it"
     gemini_embedding_model: str = "gemini-embedding-001"
     gemini_timeout: float = 20
+    gemini_plan_timeout: float = 8
 
     model_config = SettingsConfigDict(
         env_file=(".env", "../.env"),

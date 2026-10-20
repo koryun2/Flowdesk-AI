@@ -3,6 +3,39 @@ import { Card } from '../../components/ui'
 import { media } from '../../styles/theme'
 import type { KnowledgeDocument } from '../../types'
 
+export const QueueCard = styled(Card)`
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  margin-bottom: 14px;
+  padding: 14px;
+
+  > span {
+    display: grid;
+    width: 36px;
+    height: 36px;
+    place-items: center;
+    border-radius: 10px;
+    color: ${({ theme }) => theme.violet};
+    background: ${({ theme }) => theme.violetSoft};
+  }
+
+  > div {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+  }
+
+  strong {
+    font-size: 13px;
+  }
+
+  small {
+    color: ${({ theme }) => theme.textTertiary};
+    font-size: 8px;
+  }
+`
+
 export const KnowledgeStats = styled.section`
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

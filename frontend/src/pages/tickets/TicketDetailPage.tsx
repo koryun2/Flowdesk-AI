@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import {
   ButtonLink,
@@ -35,9 +35,12 @@ export function TicketDetailPage() {
   const [isInternal, setIsInternal] = useState(false)
   const [addingTag, setAddingTag] = useState(false)
   const [tagName, setTagName] = useState('')
+  const [watchingAnalysis, setWatchingAnalysis] = useState(false)
+  const analysisBaseline = useRef<{ createdAt?: string; error?: string }>({})
   const { data, isLoading, isError } = useQuery({
     queryKey: ['ticket', ticketId],
     queryFn: () => workspaceApi.getTicket(ticketId),
+    refetchInterval: watchingAnalysis ? 1500 : false,
   })
 
   const refresh = () => {
@@ -71,10 +74,41 @@ export function TicketDetailPage() {
     onError: () => notify('Unable to add comment', 'error'),
   })
 
+  useEffect(() => {
+    if (!watchingAnalysis) return
+    const timer = window.setTimeout(() => {
+      setWatchingAnalysis(false)
+      notify('Analysis is still waiting in Redis')
+    }, 45000)
+    return () => window.clearTimeout(timer)
+  }, [notify, watchingAnalysis])
+
+  useEffect(() => {
+    if (!watchingAnalysis || !data) return
+    const createdAt = data.ticket.analysis?.createdAt
+    const error = data.ticket.analysisError
+    const changed =
+      createdAt !== analysisBaseline.current.createdAt ||
+      (error || '') !== (analysisBaseline.current.error || '')
+    if (!changed || (!createdAt && !error)) return
+    setWatchingAnalysis(false)
+    void queryClient.invalidateQueries({ queryKey: ['notifications'] })
+    notify(error ? 'Ticket analysis failed' : 'Ticket analysis updated')
+  }, [data, notify, queryClient, watchingAnalysis])
+
   const analyzeMutation = useMutation({
     mutationFn: () => workspaceApi.analyzeTicket(ticketId),
-    onSuccess: () => {
+    onSuccess: (result) => {
       refresh()
+      if (result.analysisPending) {
+        analysisBaseline.current = {
+          createdAt: data?.ticket.analysis?.createdAt,
+          error: data?.ticket.analysisError,
+        }
+        setWatchingAnalysis(true)
+        notify('Analysis queued in Redis')
+        return
+      }
       void queryClient.invalidateQueries({ queryKey: ['notifications'] })
       notify('Ticket analysis updated')
     },
@@ -184,7 +218,7 @@ export function TicketDetailPage() {
           />
 
           <TicketAnalysis
-            analyzePending={analyzeMutation.isPending}
+            analyzePending={analyzeMutation.isPending || watchingAnalysis}
             onApplyTag={(tag) => tagMutation.mutate(tag)}
             onRetryAnalyze={() => analyzeMutation.mutate()}
             tagPending={tagMutation.isPending}

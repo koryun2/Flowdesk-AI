@@ -43,6 +43,7 @@ export function AddSourceForm({ open, onClose }: AddSourceFormProps) {
       queryClient.invalidateQueries({ queryKey: ['documents'] })
       queryClient.invalidateQueries({ queryKey: ['document-summary'] })
       queryClient.invalidateQueries({ queryKey: ['notifications'] })
+      queryClient.invalidateQueries({ queryKey: ['redis-jobs'] })
       setTitle('')
       setSource('')
       setFile(null)
@@ -50,6 +51,10 @@ export function AddSourceForm({ open, onClose }: AddSourceFormProps) {
       onClose()
       if (document.status === 'failed') {
         notify(document.errorMessage || 'The source could not be indexed', 'error')
+        return
+      }
+      if (document.status === 'processing') {
+        notify('Source queued in Redis')
         return
       }
       notify('Source indexed')

@@ -64,7 +64,18 @@ export function AgentPage() {
       setConversationId(result.conversationId)
       setMessages((current) => [...current, result.message])
     },
-    onError: () => notify('The agent could not complete that request', 'error'),
+    onError: () => {
+      setMessages((current) => [
+        ...current,
+        {
+          id: crypto.randomUUID(),
+          role: 'assistant',
+          content: 'The agent could not complete that request. Try again.',
+          createdAt: new Date().toISOString(),
+        },
+      ])
+      notify('The agent could not complete that request', 'error')
+    },
   })
   const decision = useMutation({
     mutationFn: ({ id, choice }: { id: string; choice: 'approve' | 'cancel' }) =>

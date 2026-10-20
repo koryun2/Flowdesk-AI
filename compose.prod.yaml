@@ -39,12 +39,15 @@ services:
       DB_HOST: db
       DB_PORT: 5432
       AI_SERVICE_URL: http://ai-service:8001
+      REDIS_URL: redis://redis:6379/0
       SEED_DEMO: ${SEED_DEMO:-false}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemma-4-26b-a4b-it}
       GEMINI_EMBEDDING_MODEL: ${GEMINI_EMBEDDING_MODEL:-gemini-embedding-001}
     depends_on:
       db:
+        condition: service_healthy
+      redis:
         condition: service_healthy
       ai-service:
         condition: service_healthy
@@ -60,6 +63,32 @@ services:
       timeout: 5s
       retries: 10
       start_period: 20s
+
+  worker:
+    build:
+      context: ./backend
+    command: python manage.py work
+    environment:
+      DJANGO_ENV: production
+      DJANGO_DEBUG: "false"
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?Set DJANGO_SECRET_KEY to a unique value of at least 32 characters}
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1}
+      DB_ENGINE: django.db.backends.postgresql
+      POSTGRES_DB: ${POSTGRES_DB:-flowdesk}
+      POSTGRES_USER: ${POSTGRES_USER:-flowdesk}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      DB_HOST: db
+      DB_PORT: 5432
+      AI_SERVICE_URL: http://ai-service:8001
+      REDIS_URL: redis://redis:6379/0
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemma-4-26b-a4b-it}
+      GEMINI_EMBEDDING_MODEL: ${GEMINI_EMBEDDING_MODEL:-gemini-embedding-001}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
   ai-service:
     build:

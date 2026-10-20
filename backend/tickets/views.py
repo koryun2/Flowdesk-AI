@@ -10,7 +10,7 @@ from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 
 from accounts.permissions import OrganizationRolePermission
-from ai_ops.services import analyze_ticket
+from core.jobs import enqueue
 from audit.models import ActivityLog
 from audit.services import record_activity
 from core.api import ordered
@@ -127,7 +127,10 @@ class TicketViewSet(viewsets.ModelViewSet):
             context={"detail": ticket.title},
         )
         if ticket.organization.auto_analyze_tickets:
-            analyze_ticket(ticket)
+            enqueue(
+                "analyze_ticket",
+                {"ticket_id": str(ticket.id), "label": ticket.title},
+            )
 
     def perform_update(self, serializer):
         previous_status = serializer.instance.status
@@ -161,9 +164,15 @@ class TicketViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def analyze(self, request, pk=None):
         ticket = self.get_object()
-        analyze_ticket(ticket)
+        inline = enqueue(
+            "analyze_ticket",
+            {"ticket_id": str(ticket.id), "label": ticket.title},
+        )
         ticket = self.get_queryset().get(pk=ticket.pk)
-        return Response(TicketDetailSerializer(ticket, context=self.get_serializer_context()).data)
+        payload = TicketDetailSerializer(ticket, context=self.get_serializer_context()).data
+        if not inline:
+            payload["analysis_pending"] = True
+        return Response(payload)
 
     @action(detail=False, methods=["get"])
     def summary(self, request):

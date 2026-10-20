@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
 import os
+import sys
 from datetime import timedelta
 from pathlib import Path
 
@@ -183,6 +184,8 @@ AUTH_USER_MODEL = 'accounts.User'
 CORS_ALLOWED_ORIGINS = env_list("CORS_ALLOWED_ORIGINS", "http://localhost:5173")
 AI_SERVICE_URL = os.getenv("AI_SERVICE_URL", "http://localhost:8001")
 AI_SERVICE_TIMEOUT = float(os.getenv("AI_SERVICE_TIMEOUT", "20"))
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+JOBS_EAGER = os.getenv("JOBS_EAGER", "").lower() == "true" or "test" in sys.argv
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [

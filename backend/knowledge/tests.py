@@ -2,6 +2,7 @@ from unittest.mock import patch
 from urllib.error import URLError
 
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import override_settings
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -413,3 +414,115 @@ class KnowledgeApiTests(APITestCase):
                 format="json",
             )
         self.assertEqual(created.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class FakeRedis:
+    def __init__(self):
+        self.lists = {}
+        self.hashes = {}
+
+    def pipeline(self):
+        return FakePipe(self)
+
+    def llen(self, key):
+        return len(self.lists.get(key, []))
+
+    def lrange(self, key, start, end):
+        values = self.lists.get(key, [])
+        if end < 0:
+            end = len(values) + end
+        return values[start : end + 1]
+
+    def brpop(self, key, timeout=0):
+        values = self.lists.get(key, [])
+        if not values:
+            return None
+        return key, values.pop()
+
+    def hgetall(self, key):
+        return dict(self.hashes.get(key, {}))
+
+    def hset(self, key, mapping=None):
+        self.hashes.setdefault(key, {}).update(mapping or {})
+
+    def expire(self, key, seconds):
+        return True
+
+
+class FakePipe:
+    def __init__(self, client):
+        self.client = client
+        self.ops = []
+
+    def hset(self, key, mapping=None):
+        self.ops.append(("hset", key, mapping))
+        return self
+
+    def expire(self, key, seconds):
+        self.ops.append(("expire",))
+        return self
+
+    def lpush(self, key, value):
+        self.ops.append(("lpush", key, value))
+        return self
+
+    def ltrim(self, key, start, end):
+        self.ops.append(("ltrim", key, start, end))
+        return self
+
+    def execute(self):
+        for op in self.ops:
+            if op[0] == "hset":
+                self.client.hset(op[1], mapping=op[2])
+            elif op[0] == "lpush":
+                self.client.lists.setdefault(op[1], []).insert(0, op[2])
+            elif op[0] == "ltrim":
+                values = self.client.lists.get(op[1], [])
+                self.client.lists[op[1]] = values[op[2] : op[3] + 1]
+        return []
+
+
+@override_settings(JOBS_EAGER=False)
+class RedisQueueTests(APITestCase):
+    def setUp(self):
+        self.client, self.user, self.organization = workspace()
+        self.embeddings = patch(
+            "knowledge.services.request_embeddings",
+            side_effect=KnowledgeAIError("AI service is unavailable."),
+        )
+        self.embeddings.start()
+        self.addCleanup(self.embeddings.stop)
+        self.fake = FakeRedis()
+        self.redis = patch("core.jobs.redis_client", return_value=self.fake)
+        self.redis.start()
+        self.addCleanup(self.redis.stop)
+
+    def test_indexing_waits_on_the_redis_queue(self):
+        from core.jobs import work_once
+
+        created = self.client.post(
+            reverse("document-list"),
+            {
+                "title": "Queued export guide",
+                "source_type": "text",
+                "content": EXPORT_GUIDE,
+            },
+            format="json",
+        )
+        queued = self.client.get(reverse("workspace-jobs"))
+
+        self.assertEqual(created.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(created.data["status"], "processing")
+        self.assertEqual(created.data["chunk_count"], 0)
+        self.assertEqual(queued.status_code, status.HTTP_200_OK)
+        self.assertEqual(queued.data["queued"], 1)
+        self.assertEqual(queued.data["jobs"][0]["status"], "queued")
+        self.assertEqual(queued.data["jobs"][0]["label"], "Queued export guide")
+        self.assertTrue(work_once())
+
+        ready = self.client.get(reverse("document-detail", args=[created.data["id"]]))
+        finished = self.client.get(reverse("workspace-jobs"))
+        self.assertEqual(ready.data["status"], "ready")
+        self.assertGreaterEqual(ready.data["chunk_count"], 1)
+        self.assertEqual(finished.data["queued"], 0)
+        self.assertEqual(finished.data["jobs"][0]["status"], "done")

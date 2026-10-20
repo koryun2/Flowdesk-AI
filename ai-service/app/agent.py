@@ -97,6 +97,8 @@ def plan_locally(message: str) -> dict:
         calls = [{"name": "update_ticket", "arguments": _update_args(message, text)}]
     elif _wants_customer_roster(text):
         calls = [{"name": "get_customer", "arguments": {"scope": "all"}}]
+    elif _wants_ticket_count(text):
+        calls = [{"name": "search_tickets", "arguments": _ticket_count_args(text)}]
     else:
         calls = []
         if _is_ticket_search(text):
@@ -120,6 +122,7 @@ def plan_locally(message: str) -> dict:
 
 
 def plan_with_gemini(message: str, settings: Settings, prior: str = "") -> dict:
+    settings = settings.model_copy(update={"gemini_timeout": settings.gemini_plan_timeout})
     user_text = message
     if prior.strip():
         user_text = f"Recent conversation:\n{prior.strip()}\n\nNew request:\n{message}"
@@ -128,9 +131,11 @@ def plan_with_gemini(message: str, settings: Settings, prior: str = "") -> dict:
             (
                 "Choose Flowdesk tools for an operations request. "
                 "Use search_tickets for ticket questions. Put one keyword in query, such as export, not the whole sentence. "
+                "For how many tickets, set status and leave query empty. Open tickets use status open, not the word open as a query. "
                 "Use get_customer with scope all to count or list customers. "
                 "Use get_customer with health at_risk for at-risk customers, or query for one named customer. "
-                "Use search_knowledge_base for documentation questions. "
+                "Use search_knowledge_base for a CV, resume, guide, or other document. "
+                "Do not use get_customer for a CV or resume. "
                 "Use create_ticket, update_ticket, and add_ticket_comment only when the user asks to change data. "
                 "Leave unused argument strings empty, is_internal false, and created_within_days 0. "
                 "Do not invent ticket numbers. Put ticket keys such as FD-1284 in the ticket field. "
@@ -181,6 +186,16 @@ ROSTER_FOLLOWUPS = {"all", "everyone", "all of them", "list them", "show all", "
 
 def _revise_plan(message: str, prior: str, plan: dict) -> dict:
     text = message.lower().strip()
+    if _wants_document(text) and not (_is_create(text) or _is_update(text) or _is_comment(text)):
+        plan["tool_calls"] = [
+            {"name": "search_knowledge_base", "arguments": {"question": message.strip()}}
+        ]
+        plan["reply"] = ""
+        return plan
+    if _wants_ticket_count(text):
+        plan["tool_calls"] = [{"name": "search_tickets", "arguments": _ticket_count_args(text)}]
+        plan["reply"] = ""
+        return plan
     if _wants_customer_roster(text, prior):
         plan["tool_calls"] = [{"name": "get_customer", "arguments": {"scope": "all"}}]
         plan["reply"] = ""
@@ -196,9 +211,34 @@ def _revise_plan(message: str, prior: str, plan: dict) -> dict:
             keywords = _search_keywords(query)
             if keywords:
                 arguments["query"] = keywords
+            else:
+                arguments.pop("query", None)
         revised.append({"name": "search_tickets", "arguments": arguments})
     plan["tool_calls"] = revised
     return plan
+
+
+def _wants_ticket_count(text: str) -> bool:
+    if "ticket" not in text:
+        return False
+    return any(phrase in text for phrase in ("how many", "number of", "count of", "tickets we have"))
+
+
+def _ticket_count_args(text: str) -> dict:
+    arguments = {}
+    if "closed" in text:
+        arguments["status"] = "closed"
+    elif "investigating" in text:
+        arguments["status"] = "investigating"
+    elif any(word in text for word in ("unresolved", "open")):
+        arguments["status"] = "open"
+    if "urgent" in text:
+        arguments["priority"] = "urgent"
+    if "today" in text:
+        arguments["created_within_days"] = 1
+    if not arguments:
+        arguments["scope"] = "all"
+    return arguments
 
 
 def _wants_customer_roster(text: str, prior: str = "") -> bool:
@@ -222,7 +262,7 @@ def _search_keywords(query: str) -> str:
     words = re.findall(r"[a-z0-9]+", query.lower())
     kept = [word for word in words if word not in SEARCH_FILLER and len(word) > 2]
     if not kept:
-        return query.strip()
+        return ""
     return " ".join(kept[:3])
 
 
@@ -353,5 +393,11 @@ def _is_customer_lookup(text: str) -> bool:
     return "customer" in text or "at risk" in text or "at-risk" in text
 
 
+def _wants_document(text: str) -> bool:
+    if re.search(r"\b(cv|resume|docs|documents|documentation)\b", text):
+        return True
+    return any(word in text for word in ("knowledge base", "guide"))
+
+
 def _is_knowledge(text: str) -> bool:
-    return any(word in text for word in ("doc", "knowledge", "guide", "how "))
+    return _wants_document(text) or "how " in text or "doc" in text or "knowledge" in text

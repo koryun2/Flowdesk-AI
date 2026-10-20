@@ -176,9 +176,16 @@ def _search_tickets(organization, arguments: dict) -> str:
     query = str(arguments.get("query") or "").strip()
     status_value = str(arguments.get("status") or "").strip()
     priority = str(arguments.get("priority") or "").strip()
+    scope = str(arguments.get("scope") or "").strip()
     within = arguments.get("created_within_days")
     has_window = isinstance(within, int) and 1 <= within <= 30
-    if not query and not status_value and priority not in TICKET_PRIORITIES and not has_window:
+    if (
+        scope != "all"
+        and not query
+        and not status_value
+        and priority not in TICKET_PRIORITIES
+        and not has_window
+    ):
         return "Tell me which tickets to look for, such as export bugs or urgent tickets."
     if query:
         matched = queryset.filter(ticket_search(query))
@@ -205,6 +212,7 @@ def _search_tickets(organization, arguments: dict) -> str:
     if has_window:
         start = timezone.now() - timedelta(days=within)
         queryset = queryset.filter(created_at__gte=start)
+    total = queryset.count()
     tickets = list(queryset.order_by("-created_at")[:5])
     if not tickets:
         return "No tickets matched that search."
@@ -212,9 +220,18 @@ def _search_tickets(organization, arguments: dict) -> str:
         f"{_ticket_link(ticket)} {ticket.title} ({ticket.priority}, {ticket.status})"
         for ticket in tickets
     )
-    noun = "ticket" if len(tickets) == 1 else "tickets"
-    about = f" about {query}" if query else ""
-    return f"Found {len(tickets)} {noun}{about}: {rendered}."
+    noun = "ticket" if total == 1 else "tickets"
+    hidden = total - len(tickets)
+    more = f" and {hidden} more" if hidden else ""
+    if not query:
+        kind = ""
+        if status_value == "open":
+            kind = "open "
+        elif status_value in TICKET_STATUSES:
+            kind = f"{status_value} "
+        verb = "is" if total == 1 else "are"
+        return f"There {verb} {total} {kind}{noun}: {rendered}{more}."
+    return f"Found {total} {noun} about {query}: {rendered}{more}."
 
 
 def _get_customers(organization, arguments: dict) -> str:
@@ -223,7 +240,9 @@ def _get_customers(organization, arguments: dict) -> str:
     )
     scope = str(arguments.get("scope") or "").strip()
     health = str(arguments.get("health") or "").strip()
-    query = str(arguments.get("query") or "").strip()
+    query = str(arguments.get("query") or arguments.get("customer") or "").strip()
+    if scope == "all" and query:
+        scope = ""
     if scope != "all":
         if health == "at_risk":
             queryset = queryset.filter(metadata__health__in=["at_risk", "critical"])
@@ -341,10 +360,13 @@ def _execute_write(action: AgentAction, user, membership) -> str:
         )
         serializer.is_valid(raise_exception=True)
         ticket = serializer.save(organization=membership.organization, created_by=user)
-        from ai_ops.services import analyze_ticket
+        from core.jobs import enqueue
 
         if membership.organization.auto_analyze_tickets:
-            analyze_ticket(ticket)
+            enqueue(
+                "analyze_ticket",
+                {"ticket_id": str(ticket.id), "label": ticket.title},
+            )
         record_activity(
             organization=membership.organization,
             actor=user,

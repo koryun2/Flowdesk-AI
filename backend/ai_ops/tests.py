@@ -262,6 +262,18 @@ class AgentApiTests(APITestCase):
         self.assertIn(self.ticket["key"], response.data["content"])
         self.assertIn("about export bugs", response.data["content"])
 
+    def test_open_ticket_count_names_the_total(self):
+        with self._plan([{"name": "search_tickets", "arguments": {"status": "open"}}]):
+            response = self.client.post(
+                reverse("agent-turn"),
+                {"message": "how many open tickets we have?"},
+                format="json",
+            )
+
+        self.assertIn("1 open ticket", response.data["content"])
+        self.assertIn(self.ticket["key"], response.data["content"])
+        self.assertNotIn("about open", response.data["content"])
+
     def test_customer_roster_counts_the_workspace(self):
         with self._plan([{"name": "get_customer", "arguments": {"scope": "all"}}]):
             response = self.client.post(

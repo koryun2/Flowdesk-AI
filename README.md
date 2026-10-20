@@ -53,6 +53,10 @@ A direct question about one section is answered from that section’s text. Gemi
 
 Unknown tools are ignored. At most four calls run per turn. When a tool returns data, Django writes the reply from that data, including ticket links such as `[FD-1284](/tickets/<uuid>)`. The model does not invent the ticket id.
 
+After the model returns a plan, a short set of rules replaces a few common mistakes. A CV, resume, or other document is searched in the knowledge base. A ticket count such as “how many open tickets” uses `search_tickets` with a status and an empty query, so the word “open” is not treated as a search term. Words that only mean “ticket” or “open” are dropped from other searches. A named customer lookup uses that name and does not list the whole roster.
+
+The planner waits 8 seconds for Gemini. If that call fails or times out, the same rules run on the local planner (`flowdesk-local-agent`) and Django still receives the plan. Django waits up to 30 seconds for it. If the turn still fails, the thread shows an assistant message instead of leaving the question unanswered.
+
 Conversations are stored per user and workspace. On a follow-up, the planner receives the last eight messages from that conversation, capped at 4,000 characters. The workspace model setting is sent with the plan, so the same choice covers ticket analysis and the agent.
 
 ### Human-in-the-loop
@@ -93,7 +97,7 @@ flowchart LR
   AI --> MODELS
 ```
 
-FastAPI does not write application tables. Django calls it and decides what is stored. Redis is started by Compose and is not read by application code.
+FastAPI does not write application tables. Django calls it and decides what is stored. Redis holds the background queue for knowledge indexing and ticket analysis. A worker process takes jobs with `BRPOP` and writes the result back through Django.
 
 In production, nginx serves the built frontend and proxies `/api`, `/admin`, and `/static` to Django, so the browser uses one origin. In development, Vite proxies the API to Django.
 
@@ -117,7 +121,7 @@ Relational data lives in PostgreSQL 17. Knowledge chunk embeddings are also stor
 
 With `GEMINI_API_KEY` set, analysis and planning call Gemini (`generateContent` with a JSON schema). Embeddings call `gemini-embedding-001` at 128 dimensions. The default chat model is `gemma-4-26b-a4b-it`. Admins can also select `gemini-3.6-flash`. Django sends that workspace choice for ticket analysis and for the agent planner. A stored value outside those two models is sent as `gemma-4-26b-a4b-it`.
 
-With an empty key, analysis uses keyword rules, embeddings use a deterministic hashed bag-of-tokens vector, answers are extractive, and the agent uses a rule planner (`flowdesk-local-agent`). If a Gemini plan or embedding call fails, those paths fall back to the local implementation. Ticket analysis does not: a Gemini failure is stored as a failed analysis. A simple section lookup stays extractive even when a key is set, so that question does not spend a generation call.
+With an empty key, analysis uses keyword rules, embeddings use a deterministic hashed bag-of-tokens vector, answers are extractive, and the agent uses a rule planner (`flowdesk-local-agent`). If a Gemini plan or embedding call fails, those paths fall back to the local implementation. A plan waits 8 seconds before that fallback, so a slow model does not outlast Django’s 30 second wait. Ticket analysis does not fall back: a Gemini failure is stored as a failed analysis. A simple section lookup stays extractive even when a key is set, so that question does not spend a generation call.
 
 ## 4. AI architecture
 
@@ -159,6 +163,8 @@ The answer prompt asks for the final answer only. A reply that contains a draft,
 User message
         →  Django  (length check, workspace, role)
         →  FastAPI  POST /v1/agent/plan
+        →  Gemini, or the local planner if that call fails within 8 seconds
+        →  revise the plan (document, ticket count, customer name, filler words)
         →  tool name + arguments, limited to the six tools
         →  Django executes reads immediately
         →  Django validates writes
@@ -203,7 +209,8 @@ Approval is the default, not a hard-coded law. The workspace flag exists so an a
 - Ticket analysis uses a JSON schema and Pydantic models, with a local classifier when no API key is set.
 - Knowledge ingestion covers text, PDF, Word, and public URLs, with section-aware chunking and a checksum so the same content is not indexed twice. A title rename does not reindex.
 - Retrieval uses pgvector HNSW for candidates, a hybrid cosine plus lexical rank, and a section match. A single-section question is answered from that section. Each document is cited once.
-- The agent planner is constrained to six tools. Django runs the plan and writes replies from tool results.
+- Redis is the job queue. Indexing a source and analyzing a ticket are pushed with `LPUSH` and finished by a worker, so those calls do not block the request.
+- The agent planner is constrained to six tools. Document lookups, ticket counts, and named customers are corrected after the model replies. A failed Gemini plan falls back within 8 seconds, and Django writes the reply from the tool result.
 - Writes go through a pending `AgentAction`, the existing serializers, and an activity log.
 - Organizations isolate data. Roles gate reads, writes, deletes, workspace rename, and AI settings. JWTs rotate.
 - Profile, password, and workspace name persist. Ticket, reply, analysis, and knowledge events become notifications. The sidebar counts this month’s agent actions.
@@ -258,7 +265,7 @@ Approval is the default, not a hard-coded law. The workspace flag exists so an a
 - Role checks (viewer, agent, admin, owner)
 - Human approval for agent writes, on by default
 
-Redis is in both Compose files. Application code does not use it.
+Redis 8 is the broker for background jobs in both Compose files. Django pushes `index_document` and `analyze_ticket` onto the list `flowdesk:jobs`. The `worker` service runs `python manage.py work`. The knowledge page shows how many jobs are waiting. Tests run the same jobs inline, so the suite does not need a Redis server.
 
 ## 8. Quick start
 
@@ -401,7 +408,8 @@ Where the blueprint and the code disagree, the code is the source of truth. In p
 - Customers, tickets, comments, tags, and ticket search
 - Optional ticket analysis and a manual analyze action
 - Knowledge ingestion, section-aware retrieval, source titles, and one citation per document
-- Agent planning, immediate reads, approval-gated writes, and saved conversations
+- Redis queue for source indexing and ticket analysis, with a worker in Compose
+- Agent planning, with document, ticket-count, and customer corrections, immediate reads, approval-gated writes, and saved conversations
 - Workspace AI settings for analysis, approval, and the analysis model
 - Development and production Compose stacks, health checks, and CI
 
@@ -412,7 +420,6 @@ Where the blueprint and the code disagree, the code is the source of truth. In p
 
 **Intentionally out of the request path**
 
-- Redis is reserved in Compose and unused
 - The agent planner sees the recent saved conversation (last eight messages), not an unbounded transcript
 
 ## 13. Roadmap
@@ -420,4 +427,3 @@ Where the blueprint and the code disagree, the code is the source of truth. In p
 Nothing in this list is required for the operations loop. Sensible next steps:
 
 - Apply or dismiss analysis suggestions from the ticket page
-- Use Redis for a real job, or drop it from Compose

@@ -25,7 +25,7 @@ def request_plan(message: str, prior: str = "", model: str = "") -> dict:
         headers={"Content-Type": "application/json", "Accept": "application/json"},
         method="POST",
     )
-    timeout = float(getattr(settings, "AI_SERVICE_TIMEOUT", 20))
+    timeout = max(float(getattr(settings, "AI_SERVICE_TIMEOUT", 20)), 30)
     try:
         with request.urlopen(http_request, timeout=timeout) as response:
             body = json.loads(response.read().decode())

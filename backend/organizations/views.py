@@ -8,6 +8,7 @@ from rest_framework.views import APIView
 
 from accounts.permissions import ROLE_RANK, HasMinimumRole, IsOrganizationMember
 from ai_ops.models import AgentAction
+from core.jobs import queue_snapshot
 
 from .models import ANALYSIS_MODELS, Membership, Organization
 
@@ -102,6 +103,13 @@ class WorkspaceUsageView(APIView):
             created_at__gte=start,
         ).count()
         return Response({"actions_this_month": count})
+
+
+class WorkspaceJobsView(APIView):
+    permission_classes = [IsAuthenticated, HasMinimumRole]
+
+    def get(self, request):
+        return Response(queue_snapshot())
 
 
 def _workspace_slug(organization: Organization, value) -> str:

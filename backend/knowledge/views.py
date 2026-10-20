@@ -8,13 +8,13 @@ from accounts.permissions import HasMinimumRole, OrganizationRolePermission
 from audit.models import ActivityLog
 from audit.services import record_activity
 from core.api import ordered
+from core.jobs import enqueue_document
 
 from .models import KnowledgeDocument
 from .services import (
     answer_question,
     extract_upload,
     fetch_url_text,
-    index_document,
     prepare_document,
     rename_document,
 )
@@ -116,7 +116,7 @@ class KnowledgeDocumentSerializer(serializers.ModelSerializer):
             mime_type=mime_type,
             created_by=validated_data.get("created_by"),
         )
-        return index_document(document)
+        return document
 
 
 class KnowledgeDocumentViewSet(viewsets.ModelViewSet):
@@ -155,18 +155,7 @@ class KnowledgeDocumentViewSet(viewsets.ModelViewSet):
             organization=self.request.membership.organization,
             created_by=self.request.user,
         )
-        record_activity(
-            organization=document.organization,
-            actor=self.request.user,
-            action="added document",
-            entity_type=ActivityLog.EntityType.KNOWLEDGE_DOCUMENT,
-            entity_id=document.id,
-            context={
-                "detail": document.title,
-                "chunks": (document.metadata or {}).get("chunk_count", 0),
-                "status": document.status,
-            },
-        )
+        serializer.instance = enqueue_document(document, self.request.user)
 
     def partial_update(self, request, *args, **kwargs):
         document = self.get_object()

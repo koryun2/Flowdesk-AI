@@ -26,6 +26,38 @@ class LocalAgentPlannerTests(unittest.TestCase):
         self.assertEqual(plan["tool_calls"][0]["name"], "get_customer")
         self.assertEqual(plan["tool_calls"][0]["arguments"]["health"], "at_risk")
 
+    def test_cv_request_searches_the_knowledge_base(self):
+        plan = plan_message(
+            "bring me koryun hayryan's cv",
+            Settings(_env_file=None, gemini_api_key=None),
+        )
+        self.assertEqual(plan["tool_calls"][0]["name"], "search_knowledge_base")
+        self.assertIn("cv", plan["tool_calls"][0]["arguments"]["question"])
+
+    def test_gemini_cv_plan_is_not_a_customer_list(self):
+        with patch(
+            "app.agent.generate_json",
+            return_value={
+                "tool_calls": [
+                    {
+                        "name": "get_customer",
+                        "arguments": {"customer": "koryun hayryan", "scope": "all"},
+                    }
+                ],
+                "reply": "",
+            },
+        ):
+            plan = plan_message(
+                "bring me koryun hayryan's cv",
+                Settings(_env_file=None, gemini_api_key="test-key"),
+            )
+        self.assertEqual(plan["tool_calls"], [
+            {
+                "name": "search_knowledge_base",
+                "arguments": {"question": "bring me koryun hayryan's cv"},
+            }
+        ])
+
     def test_docs_search_the_knowledge_base(self):
         plan = plan_locally("Search docs for API rate limits")
         self.assertEqual(plan["tool_calls"][0]["name"], "search_knowledge_base")
@@ -120,6 +152,38 @@ class LocalAgentPlannerTests(unittest.TestCase):
             {"query": "export", "status": "open"},
         )
         self.assertEqual(plan["model_name"], "gemma-4-26b-a4b-it")
+
+    def test_open_ticket_count_is_not_a_word_search(self):
+        plan = plan_message(
+            "how many open tickets we have?",
+            Settings(_env_file=None, gemini_api_key=None),
+        )
+        self.assertEqual(
+            plan["tool_calls"],
+            [{"name": "search_tickets", "arguments": {"status": "open"}}],
+        )
+
+    def test_gemini_open_count_drops_the_word_open(self):
+        with patch(
+            "app.agent.generate_json",
+            return_value={
+                "tool_calls": [
+                    {
+                        "name": "search_tickets",
+                        "arguments": {"query": "open", "status": "open"},
+                    }
+                ],
+                "reply": "",
+            },
+        ):
+            plan = plan_message(
+                "how many open tickets we have?",
+                Settings(_env_file=None, gemini_api_key="test-key"),
+            )
+        self.assertEqual(
+            plan["tool_calls"],
+            [{"name": "search_tickets", "arguments": {"status": "open"}}],
+        )
 
     def test_customer_count_lists_the_roster(self):
         plan = plan_locally("How many customers do we have?")

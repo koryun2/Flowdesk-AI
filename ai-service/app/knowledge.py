@@ -125,6 +125,46 @@ def embed_with_gemini(texts: list[str], settings: Settings) -> tuple[list[list[f
     return vectors, settings.gemini_embedding_model
 
 
+SUMMARY_SYSTEM = (
+    "Summarize the source in 2 or 3 short sentences. "
+    "Use no more than 280 characters. "
+    "Do not add a title, bullets, or labels. "
+    "Use only the source."
+)
+NOTE_SYSTEM = (
+    "Write knowledge-base notes in markdown for the user's request. "
+    "Use only the source. Do not paste the whole source. "
+    "You may use # headings, ## headings, **bold**, *italic*, and lists. "
+    "If the source does not contain the requested information, say that in one sentence."
+)
+
+
+def summarize_source(text: str, settings: Settings) -> tuple[str, str]:
+    cleaned = " ".join(text.split())
+    if settings.gemini_api_key and cleaned:
+        try:
+            drafted = generate_text(SUMMARY_SYSTEM, cleaned[:8000], settings).strip()
+        except RuntimeError:
+            drafted = ""
+        if drafted:
+            return drafted, settings.gemini_model
+    return cleaned, LOCAL_ANSWER_MODEL
+
+
+def draft_source_notes(source: str, request_text: str, notes: str, settings: Settings) -> str:
+    if not settings.gemini_api_key:
+        raise RuntimeError("The assistant is unavailable.")
+    user = (
+        f"REQUEST:\n{request_text.strip()}\n\n"
+        f"CURRENT NOTES:\n{notes.strip()}\n\n"
+        f"SOURCE:\n{source.strip()[:8000]}"
+    )
+    drafted = generate_text(NOTE_SYSTEM, user, settings).strip()
+    if not drafted:
+        raise RuntimeError("The assistant did not write any notes.")
+    return drafted
+
+
 def answer_with_gemini(question: str, sources: list[dict], settings: Settings) -> str | None:
     context = "\n\n".join(
         f"{str(source.get('title') or 'Document').strip()}\n{str(source.get('excerpt') or '').strip()}".strip()

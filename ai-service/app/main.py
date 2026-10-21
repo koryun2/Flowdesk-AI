@@ -8,7 +8,13 @@ from pydantic import BaseModel, Field
 from .agent import phrase_reply, plan_message
 from .classifier import build_analysis
 from .config import get_settings
-from .knowledge import EMBEDDING_DIMENSIONS, answer_question, embed_texts
+from .knowledge import (
+    EMBEDDING_DIMENSIONS,
+    answer_question,
+    draft_source_notes,
+    embed_texts,
+    summarize_source,
+)
 from .schemas import TicketAnalysis, TicketAnalysisRequest
 
 
@@ -157,6 +163,42 @@ def phrase_agent_reply(payload: AgentReplyRequest) -> AgentReplyResponse:
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return AgentReplyResponse(reply=reply, model_name=current.gemini_model)
+
+
+class SummaryRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=8000)
+
+
+class SummaryResponse(BaseModel):
+    summary: str
+    model_name: str
+
+
+class NoteDraftRequest(BaseModel):
+    source: str = Field(default="", max_length=8000)
+    request: str = Field(min_length=3, max_length=1000)
+    notes: str = Field(default="", max_length=8000)
+
+
+class NoteDraftResponse(BaseModel):
+    notes: str
+    model_name: str
+
+
+@app.post("/v1/knowledge/summary", tags=["knowledge"], response_model=SummaryResponse)
+def create_summary(payload: SummaryRequest) -> SummaryResponse:
+    summary, model_name = summarize_source(payload.text, get_settings())
+    return SummaryResponse(summary=summary, model_name=model_name)
+
+
+@app.post("/v1/knowledge/notes", tags=["knowledge"], response_model=NoteDraftResponse)
+def create_note_draft(payload: NoteDraftRequest) -> NoteDraftResponse:
+    current = get_settings()
+    try:
+        notes = draft_source_notes(payload.source, payload.request, payload.notes, current)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return NoteDraftResponse(notes=notes, model_name=current.gemini_model)
 
 
 @app.post("/v1/knowledge/answers", tags=["knowledge"], response_model=AnswerResponse)

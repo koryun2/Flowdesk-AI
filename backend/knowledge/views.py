@@ -1,28 +1,38 @@
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db.models import Count, Q
+from django.http import HttpResponse
 from rest_framework import serializers, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import NotFound
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 
 from accounts.permissions import HasMinimumRole, OrganizationRolePermission
+from organizations.models import Membership
 from audit.models import ActivityLog
 from audit.services import record_activity
 from core.api import ordered
 from core.files import image_mime, open_stored, store_bytes
 from core.jobs import enqueue_document
 
-from .models import KnowledgeDocument
+from .models import KnowledgeDocument, KnowledgeFile
 from .services import (
+    add_document_file,
     answer_question,
     clear_stored_file,
+    docx_html,
+    draft_notes,
     fetch_url_text,
+    indexable_text,
     prepare_document,
     prepare_image_document,
     read_upload,
     rename_document,
     replace_image_document,
+    save_notes,
     selected_documents,
     store_document_content,
+    write_summary,
 )
 
 
@@ -157,7 +167,12 @@ class KnowledgeDocumentViewSet(viewsets.ModelViewSet):
     http_method_names = ["get", "post", "patch", "delete", "head", "options"]
 
     def get_permissions(self):
-        if self.action in {"list", "retrieve", "ask", "summary", "content", "file"}:
+        if self.action == "stored" and self.request.method == "DELETE":
+            self.delete_role = Membership.Role.AGENT
+            return [OrganizationRolePermission()]
+        if self.action in {"list", "retrieve", "ask", "summary", "content", "file", "summarize"} or (
+            self.action == "stored" and self.request.method == "GET"
+        ):
             return [HasMinimumRole()]
         return [OrganizationRolePermission()]
 
@@ -165,11 +180,16 @@ class KnowledgeDocumentViewSet(viewsets.ModelViewSet):
         queryset = (
             KnowledgeDocument.objects.filter(organization=self.request.membership.organization)
             .select_related("created_by")
+            .prefetch_related("files")
             .annotate(chunk_count=Count("chunks"))
         )
         search = self.request.query_params.get("search", "").strip()[:200]
         if search:
-            queryset = queryset.filter(Q(title__icontains=search) | Q(content__icontains=search))
+            queryset = queryset.filter(
+                Q(title__icontains=search)
+                | Q(content__icontains=search)
+                | Q(notes__icontains=search)
+            )
         status_value = self.request.query_params.get("status", "").strip()
         if status_value:
             if status_value not in KnowledgeDocument.Status.values:
@@ -202,9 +222,9 @@ class KnowledgeDocumentViewSet(viewsets.ModelViewSet):
     def partial_update(self, request, *args, **kwargs):
         document = self.get_object()
         payload = request.data
-        if set(payload.keys()) - {"title", "content", "source_url", "file", "refresh"}:
+        if set(payload.keys()) - {"title", "content", "notes", "source_url", "file", "refresh"}:
             raise serializers.ValidationError(
-                {"detail": "Only the title, text, file, or URL can be changed."}
+                {"detail": "Only the title, notes, file, or URL can be changed."}
             )
         if not payload:
             raise serializers.ValidationError({"detail": "Nothing to update."})
@@ -224,6 +244,7 @@ class KnowledgeDocumentViewSet(viewsets.ModelViewSet):
                     entity_id=document.id,
                     context={"detail": document.title},
                 )
+        should_index = False
         if replacement is not None:
             if replacement["image"]:
                 replace_image_document(document, replacement["raw"], **replacement["fields"])
@@ -240,8 +261,14 @@ class KnowledgeDocumentViewSet(viewsets.ModelViewSet):
                     )
                 else:
                     clear_stored_file(document)
-                if changed:
-                    document = enqueue_document(document, request.user)
+                should_index = changed
+        if "notes" in payload:
+            notes = payload.get("notes")
+            if not isinstance(notes, str):
+                raise serializers.ValidationError({"notes": "Enter notes as text."})
+            should_index = save_notes(document, notes) or should_index
+        if should_index and len(indexable_text(document)) >= 40:
+            document = enqueue_document(document, request.user)
         document = self.get_queryset().get(pk=document.pk)
         return Response(self.get_serializer(document).data)
 
@@ -277,18 +304,92 @@ class KnowledgeDocumentViewSet(viewsets.ModelViewSet):
         return Response(
             {
                 "content": document.content,
+                "notes": document.notes,
+                "summary": document.summary,
                 "source_type": document.source_type,
                 "source_url": document.source_url,
                 "file_name": document.file_name,
                 "mime_type": document.mime_type,
                 "has_file": bool(document.stored_file),
+                "files": _file_list(document),
             }
+        )
+
+    @action(detail=True, methods=["post"])
+    def summarize(self, request, pk=None):
+        document = self.get_object()
+        return Response({"summary": write_summary(document)})
+
+    @action(detail=True, methods=["post"], url_path="note-draft")
+    def draft(self, request, pk=None):
+        document = self.get_object()
+        request_text = request.data.get("request", "")
+        if not isinstance(request_text, str):
+            raise serializers.ValidationError({"request": "Describe what the notes should say."})
+        return Response({"notes": draft_notes(document, request_text)})
+
+    @action(detail=True, methods=["post"])
+    def files(self, request, pk=None):
+        document = self.get_object()
+        upload = request.FILES.get("file")
+        added = add_document_file(document, upload)
+        document.summary = ""
+        document.save(update_fields=["summary", "updated_at"])
+        record_activity(
+            organization=document.organization,
+            actor=request.user,
+            action="added file",
+            entity_type=ActivityLog.EntityType.KNOWLEDGE_DOCUMENT,
+            entity_id=document.id,
+            context={"detail": added.file_name},
+        )
+        if len(indexable_text(document)) >= 40:
+            enqueue_document(document, request.user)
+        return Response(_file_list(self.get_queryset().get(pk=document.pk)), status=201)
+
+    @action(
+        detail=True,
+        methods=["get", "delete"],
+        url_path=r"files/(?P<file_id>[0-9a-f-]{36})",
+    )
+    def stored(self, request, pk=None, file_id=None):
+        document = self.get_object()
+        try:
+            stored = document.files.get(pk=file_id)
+        except (KnowledgeFile.DoesNotExist, ValueError, DjangoValidationError) as exc:
+            raise NotFound() from exc
+        if request.method == "DELETE":
+            file_name = stored.file_name
+            stored.delete()
+            document.summary = ""
+            document.save(update_fields=["summary", "updated_at"])
+            record_activity(
+                organization=document.organization,
+                actor=request.user,
+                action="removed file",
+                entity_type=ActivityLog.EntityType.KNOWLEDGE_DOCUMENT,
+                entity_id=document.id,
+                context={"detail": file_name},
+            )
+            if len(indexable_text(document)) >= 40:
+                enqueue_document(document, request.user)
+            return Response(status=204)
+        return _serve_file(
+            stored.stored_file,
+            stored.file_name or "file",
+            stored.mime_type,
+            request.query_params.get("view", ""),
         )
 
     @action(detail=True, methods=["get"])
     def file(self, request, pk=None):
         document = self.get_object()
-        return open_stored(document.stored_file, document.file_name or "file", document.mime_type)
+        return _serve_file(
+            document.stored_file,
+            document.file_name or "file",
+            document.mime_type,
+            request.query_params.get("view", ""),
+        )
 
     @action(detail=False, methods=["post"])
     def ask(self, request):
@@ -301,6 +402,42 @@ class KnowledgeDocumentViewSet(viewsets.ModelViewSet):
             request.membership.organization, request.data.get("document_ids")
         )
         return Response(answer_question(request.membership.organization, question, document_ids))
+
+
+def _serve_file(field, file_name: str, mime_type: str, view: str):
+    if view == "html" and file_name.lower().endswith(".docx"):
+        if not field:
+            raise NotFound()
+        try:
+            with field.open("rb") as handle:
+                data = handle.read()
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            raise NotFound() from exc
+        return HttpResponse(docx_html(data, file_name), content_type="text/html; charset=utf-8")
+    return open_stored(field, file_name, mime_type)
+
+
+def _file_list(document: KnowledgeDocument) -> list[dict]:
+    rows = []
+    if document.stored_file:
+        rows.append(
+            {
+                "id": "primary",
+                "file_name": document.file_name,
+                "mime_type": document.mime_type,
+                "primary": True,
+            }
+        )
+    for stored in document.files.all():
+        rows.append(
+            {
+                "id": str(stored.id),
+                "file_name": stored.file_name,
+                "mime_type": stored.mime_type,
+                "primary": False,
+            }
+        )
+    return rows
 
 
 def _replacement(document: KnowledgeDocument, payload):

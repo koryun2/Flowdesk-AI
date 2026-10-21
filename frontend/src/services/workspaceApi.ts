@@ -599,12 +599,56 @@ export const workspaceApi = {
   },
 
   async documentContent(id: string) {
-    return request<{
+    const body = await request<{
       content: string
+      notes?: string
+      summary?: string
       source_type: KnowledgeDocument['sourceType']
       source_url: string
       file_name: string
+      files?: Array<{
+        id: string
+        file_name: string
+        mime_type: string
+        primary: boolean
+      }>
     }>(`/api/v1/documents/${id}/content/`)
+    return {
+      content: body.content,
+      notes: body.notes ?? '',
+      summary: body.summary ?? '',
+      sourceUrl: body.source_url || '',
+      files: (body.files ?? []).map((file) => ({
+        id: file.id,
+        fileName: file.file_name,
+        mimeType: file.mime_type || '',
+        primary: Boolean(file.primary),
+      })),
+    }
+  },
+
+  async summarizeDocument(id: string) {
+    return request<{ summary: string }>(`/api/v1/documents/${id}/summarize/`, {
+      method: 'POST',
+    })
+  },
+
+  async draftNotes(id: string, requestText: string) {
+    return request<{ notes: string }>(`/api/v1/documents/${id}/note-draft/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ request: requestText }),
+    })
+  },
+
+  async addDocumentFile(id: string, file: File) {
+    const body = new FormData()
+    body.set('file', file)
+    await request<unknown>(`/api/v1/documents/${id}/files/`, { method: 'POST', body })
+  },
+
+  async deleteDocumentFile(id: string, fileId: string) {
+    await request<void>(`/api/v1/documents/${id}/files/${fileId}/`, { method: 'DELETE' })
   },
 
   async updateDocument(
@@ -612,6 +656,7 @@ export const workspaceApi = {
     input: {
       title?: string
       content?: string
+      notes?: string
       sourceUrl?: string
       refresh?: boolean
       file?: File
@@ -632,6 +677,7 @@ export const workspaceApi = {
         body: JSON.stringify({
           ...(input.title !== undefined ? { title: input.title } : {}),
           ...(input.content !== undefined ? { content: input.content } : {}),
+          ...(input.notes !== undefined ? { notes: input.notes } : {}),
           ...(input.sourceUrl !== undefined ? { source_url: input.sourceUrl } : {}),
           ...(input.refresh ? { refresh: true } : {}),
         }),

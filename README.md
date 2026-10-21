@@ -26,17 +26,27 @@ Automatic analysis is off until an admin enables it. Anyone can still run Analyz
 
 ### RAG knowledge base
 
-A source can be pasted text, a `.txt`, `.md`, `.pdf`, or `.docx` upload (8 MB), or a public `http`/`https` URL. Private and loopback addresses are rejected. Django extracts the text and stores a 128-dimension embedding on each chunk. An agent or admin can rename a source. That change updates the title only and does not reindex the text. Viewers cannot rename it.
+A source can be pasted text, an upload, or a public `http`/`https` URL. Uploads accept `.txt`, `.md`, `.html`, `.csv`, `.json`, `.pdf`, `.docx`, and images (`.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`), up to 8 MB. Private and loopback addresses are rejected. Django keeps the original file and, for documents, the extracted text. Images are stored with no extracted text and no chunks. A source can hold up to eight files. Adding a file does not copy that file’s text into the notes.
+
+The source opens read-only. **Edit** turns on the title and the notes. The notes are for hand edits. Saving them does not replace the stored file or its extracted text. A text-only source is the exception: its notes are the indexed body. **Summary** writes a two- or three-line summary when you ask. It does not run when the source opens. Clicking a file opens it in the app: PDFs use page navigation and zoom, images zoom, text, Markdown, JSON, and CSV are shown as content, and Word files are converted to HTML and sanitized before display. Other types show the file details. Every preview can download the original or open it. Those bytes are served from an authenticated endpoint. They are not a public media URL.
+
+An agent or admin can change the title from Edit. A title change does not reindex the text. Viewers can open the source and the files. They cannot edit, add files, or delete.
 
 A document with at least two headings, such as `EDUCATION` or `WORK EXPERIENCE`, is split on those headings. Each chunk keeps a section label (`education`, `experience`, `skills`, `projects`, `profile`, `training`, or the heading itself). A long section is split further, still under the same label. A document without those headings is split into overlapping chunks of about 700 characters, with 100 characters of overlap, up to 80 chunks, and those chunks have no section label.
 
 PostgreSQL keeps the same vector in a `pgvector` column with an HNSW index (`vector_cosine_ops`). A question is embedded, the nearest chunks for that workspace and embedding model are loaded (up to 30), then re-ranked in Django: `0.35` cosine similarity and `0.65` lexical overlap. A section named in the question gets an extra `0.45` and is included even when it was outside the nearest 30. Chunks below `0.15` are dropped. The rank keeps the best chunk for each document and section, then the top three.
 
-A direct question about one section is answered from that section’s text. Gemini is not called. A question that compares sections, or asks how or why, sends those top chunks to the model. Either way the response lists each document once, with its title, excerpt, and relevance. If nothing is relevant enough, the answer is: “The knowledge base does not contain enough information to answer this question.”
+A direct question about one section is answered from that section’s text. Gemini is not called. A question that compares sections, or asks how or why, sends those top chunks to the model. A resume or CV question that does not name a section is answered from matching titles before any chunk search, so a request such as “all resumes” is not lost on a word that also appears in another document. Either way the response lists each document once, with its title, excerpt, and relevance. If nothing is relevant enough, the answer is: “The knowledge base does not contain enough information to answer this question.”
+
+Indexed text is the extracted document, the notes when they differ, and text extracted from extra files. The preview shows the original file. It does not show that index text in its place.
 
 ![Education question answered from the Resume source](docs/screenshots/knowledge-education.png)
 
 ![Experience question answered from the same Resume source](docs/screenshots/knowledge-experience.png)
+
+### Ticket screenshots
+
+A ticket can hold up to eight images under the description, on the ticket page and on the create form. Viewers see them. Agents add and remove them. The same authenticated file endpoint is used. Screenshots are not knowledge sources and are not embedded.
 
 ### AI operations agent
 
@@ -57,7 +67,7 @@ After the model returns a plan, a short set of rules replaces a few common mista
 
 The planner waits 8 seconds for Gemini. If that call fails or times out, the same rules run on the local planner (`flowdesk-local-agent`) and Django still receives the plan. Django waits up to 30 seconds for it. If the turn still fails, the thread shows an assistant message instead of leaving the question unanswered.
 
-Conversations are stored per user and workspace. On a follow-up, the planner receives the last eight messages from that conversation, capped at 4,000 characters. The workspace model setting is sent with the plan, so the same choice covers ticket analysis and the agent.
+Conversations are stored per user and workspace. On a follow-up, the planner receives the last eight messages from that conversation, capped at 4,000 characters. A reply that is only a ticket key, such as `FD-1284`, is stitched onto the previous unfinished update or comment. The workspace model setting is sent with the plan, so the same choice covers ticket analysis and the agent.
 
 ### Human-in-the-loop
 
@@ -142,14 +152,17 @@ Structured output keeps the model inside an enum and a schema. Django can store 
 ### RAG pipeline
 
 ```text
-Document or URL
+Document, file, or URL
+        →  original bytes stored privately; images stop here
         →  text extraction, private-URL rejection
+        →  notes stay separate from that extracted text
         →  section split when the document has headings, otherwise size-based chunks
         →  128-d embedding (Gemini or local)
         →  PostgreSQL + pgvector HNSW
         →  cosine candidates, plus any chunk in a named section
         →  hybrid rank (0.35 cosine, 0.65 lexical) and a 0.45 section boost
         →  best chunk per document and section, top three
+        →  a resume or CV catalog question: match titles first
         →  one section: return that text
         →  a comparison or a how/why question: Gemini, then discard a draft
         →  one citation per document
@@ -207,7 +220,7 @@ Approval is the default, not a hard-coded law. The workspace flag exists so an a
 
 - Split inference from authority: FastAPI returns structured results, Django persists them.
 - Ticket analysis uses a JSON schema and Pydantic models, with a local classifier when no API key is set.
-- Knowledge ingestion covers text, PDF, Word, and public URLs, with section-aware chunking and a checksum so the same content is not indexed twice. A title rename does not reindex.
+- Knowledge ingestion covers text, HTML, CSV, JSON, PDF, Word, images, and public URLs. Original files stay private and are previewed in the app. Extracted text is what gets chunked. A title rename does not reindex. A checksum rejects the same content twice.
 - Retrieval uses pgvector HNSW for candidates, a hybrid cosine plus lexical rank, and a section match. A single-section question is answered from that section. Each document is cited once.
 - Redis is the job queue. Indexing a source and analyzing a ticket are pushed with `LPUSH` and finished by a worker, so those calls do not block the request.
 - The agent planner is constrained to six tools. Document lookups, ticket counts, and named customers are corrected after the model replies. A failed Gemini plan falls back within 8 seconds, and Django writes the reply from the tool result.
@@ -226,6 +239,7 @@ Approval is the default, not a hard-coded law. The workspace flag exists so an a
 - Vite
 - Styled Components
 - TanStack Query
+- `react-pdf` for PDF preview, `mammoth` for Word preview, DOMPurify before that HTML is shown
 
 **Backend**
 
@@ -265,7 +279,7 @@ Approval is the default, not a hard-coded law. The workspace flag exists so an a
 - Role checks (viewer, agent, admin, owner)
 - Human approval for agent writes, on by default
 
-Redis 8 is the broker for background jobs in both Compose files. Django pushes `index_document` and `analyze_ticket` onto the list `flowdesk:jobs`. The `worker` service runs `python manage.py work`. The knowledge page shows how many jobs are waiting. Tests run the same jobs inline, so the suite does not need a Redis server.
+Redis 8 is the broker for background jobs in both Compose files. Django pushes `index_document` and `analyze_ticket` onto the list `flowdesk:jobs`. The `worker` service runs `python manage.py work`. Tests run the same jobs inline, so the suite does not need a Redis server. Uploaded files live on the `media_data` volume, mounted at `/app/media` for the backend and the worker. That directory is not served as a public URL.
 
 ## 8. Quick start
 
@@ -407,7 +421,8 @@ Where the blueprint and the code disagree, the code is the source of truth. In p
 - Workspace auth, registration, and role-based access
 - Customers, tickets, comments, tags, and ticket search
 - Optional ticket analysis and a manual analyze action
-- Knowledge ingestion, section-aware retrieval, source titles, and one citation per document
+- Knowledge ingestion, section-aware retrieval, title lookup for resumes and CVs, source notes, on-demand summaries, and one citation per document
+- Private file storage and an in-app preview for PDF, images, text, and Word, plus ticket screenshots under the description
 - Redis queue for source indexing and ticket analysis, with a worker in Compose
 - Agent planning, with document, ticket-count, and customer corrections, immediate reads, approval-gated writes, and saved conversations
 - Workspace AI settings for analysis, approval, and the analysis model

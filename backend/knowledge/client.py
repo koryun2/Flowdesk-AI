@@ -44,6 +44,29 @@ def request_embeddings(texts: list[str]) -> tuple[list[list[float]], str]:
     return embeddings, model_name
 
 
+def request_summary(text: str) -> str:
+    body = _post("/v1/knowledge/summary", {"text": text[:8000]})
+    summary = str(body.get("summary") or "").strip()
+    if not summary:
+        raise KnowledgeAIError("AI service returned an empty summary.")
+    return summary
+
+
+def request_note_draft(source: str, request_text: str, notes: str) -> str:
+    body = _post(
+        "/v1/knowledge/notes",
+        {
+            "source": source[:8000],
+            "request": request_text[:1000],
+            "notes": notes[:8000],
+        },
+    )
+    draft = str(body.get("notes") or "").strip()
+    if not draft:
+        raise KnowledgeAIError("AI service returned empty notes.")
+    return draft
+
+
 def request_answer(question: str, sources: list[dict]) -> tuple[str, str]:
     body = _post(
         "/v1/knowledge/answers",

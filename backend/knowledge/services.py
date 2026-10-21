@@ -1,7 +1,9 @@
 import hashlib
 import ipaddress
 import logging
+import re
 import socket
+from html import escape
 from html.parser import HTMLParser
 from io import BytesIO
 from pathlib import Path
@@ -15,7 +17,7 @@ from rest_framework import serializers
 
 from core.files import MAX_UPLOAD_BYTES, image_mime, read_limited, safe_name, store_bytes
 
-from .client import KnowledgeAIError, request_answer, request_embeddings
+from .client import KnowledgeAIError, request_answer, request_embeddings, request_note_draft, request_summary
 from .local_ai import (
     EMBEDDING_DIMENSIONS,
     INSUFFICIENT_ANSWER,
@@ -33,13 +35,14 @@ from .local_ai import (
     specific_tokens,
     tokenize,
 )
-from .models import KnowledgeChunk, KnowledgeDocument
+from .models import KnowledgeChunk, KnowledgeDocument, KnowledgeFile
 from .vectors import nearest_chunk_ids, write_vectors
 
 
 logger = logging.getLogger("flowdesk.api")
 
 MAX_DOCUMENT_CHARS = 60_000
+MAX_DOCUMENT_FILES = 8
 MAX_CHUNKS = 80
 MIN_RELEVANCE = 0.15
 MAX_CONTEXT_CHUNKS = 3
@@ -52,7 +55,8 @@ def index_document(document: KnowledgeDocument, *, remote: bool = True) -> Knowl
     document.error_message = ""
     document.save(update_fields=["status", "error_message", "updated_at"])
     try:
-        pieces = chunk_document(document.content)[:MAX_CHUNKS]
+        corpus = indexable_text(document)
+        pieces = chunk_document(corpus)[:MAX_CHUNKS]
         if not pieces:
             raise ValueError("The document has no readable text.")
         vectors, model_name = embed_document([content for _section, content in pieces], remote=remote)
@@ -75,7 +79,7 @@ def index_document(document: KnowledgeDocument, *, remote: bool = True) -> Knowl
             document.status = KnowledgeDocument.Status.READY
             document.metadata = {
                 **(document.metadata or {}),
-                "characters": len(document.content),
+                "characters": len(corpus),
                 "chunk_count": len(chunks),
                 "embedding_model": model_name,
             }
@@ -91,6 +95,10 @@ def index_document(document: KnowledgeDocument, *, remote: bool = True) -> Knowl
 
 
 def answer_question(organization, question: str, document_ids=None) -> dict:
+    if not detect_sections(question) and any(token in _TITLE_ALIASES for token in tokenize(question)):
+        titled = title_catalog_answer(organization, question, document_ids)
+        if titled:
+            return titled
     vector, model_name = embed_query(question)
     matches = ranked_chunks(organization, question, vector, model_name, document_ids)
     if not matches and model_name != LOCAL_EMBEDDING_MODEL:
@@ -107,6 +115,9 @@ def answer_question(organization, question: str, document_ids=None) -> dict:
     contexts = context_sources(matches)
     sources = cited_sources(matches)
     if not sources:
+        titled = title_catalog_answer(organization, question, document_ids)
+        if titled:
+            return titled
         return {
             "answer": INSUFFICIENT_ANSWER,
             "sources": [],
@@ -142,6 +153,7 @@ def prepare_document(organization, title: str, source_type: str, content: str, *
         slug=unique_slug(organization, title),
         source_type=source_type,
         content=normalized,
+        notes=normalized if source_type == KnowledgeDocument.SourceType.TEXT else "",
         checksum=checksum,
         status=KnowledgeDocument.Status.DRAFT,
         **fields,
@@ -325,6 +337,79 @@ def direct_section_answer(
     }
 
 
+_CATALOG_TOKENS = {
+    "all",
+    "any",
+    "base",
+    "bring",
+    "every",
+    "find",
+    "get",
+    "give",
+    "knowledge",
+    "list",
+    "please",
+    "show",
+}
+_TITLE_ALIASES = {
+    "cv": ("cv", "resume"),
+    "cvs": ("cv", "resume"),
+    "resume": ("resume", "cv"),
+    "resumes": ("resume", "cv"),
+}
+
+
+def _title_needles(question: str) -> list[str]:
+    needles = []
+    for token in tokenize(question):
+        if token in _CATALOG_TOKENS:
+            continue
+        for alias in _TITLE_ALIASES.get(token, (token,)):
+            if (len(alias) >= 3 or alias == "cv") and alias not in needles:
+                needles.append(alias)
+            if alias.endswith("s") and len(alias) > 4 and alias[:-1] not in needles:
+                needles.append(alias[:-1])
+    return needles
+
+
+def title_catalog_answer(organization, question: str, document_ids=None):
+    needles = _title_needles(question)
+    if not needles:
+        return None
+    documents = KnowledgeDocument.objects.filter(
+        organization=organization,
+        status=KnowledgeDocument.Status.READY,
+    )
+    if document_ids:
+        documents = documents.filter(id__in=document_ids)
+    matched = [
+        document
+        for document in documents.order_by("title")
+        if any(needle in document.title.lower() for needle in needles)
+    ]
+    if not matched:
+        return None
+    shown = matched[:5]
+    sources = []
+    excerpts = []
+    for document in shown:
+        excerpt = (document.content or "").strip()[:500]
+        excerpts.append(f"{document.title}\n{excerpt}".strip())
+        sources.append(
+            {
+                "document_id": str(document.id),
+                "title": document.title,
+                "excerpt": excerpt,
+                "relevance": 1.0,
+            }
+        )
+    answer = "\n\n".join(excerpts)
+    hidden = len(matched) - len(shown)
+    if hidden:
+        answer += f"\n\n{hidden} more matching sources are in the library."
+    return {"answer": answer, "sources": sources, "model_name": LOCAL_ANSWER_MODEL}
+
+
 def ranked_chunks(organization, question: str, vector: list[float], model_name: str, document_ids=None):
     hints = set(detect_sections(question))
     base = _chunk_base(organization, model_name, document_ids)
@@ -385,12 +470,24 @@ def store_document_content(document: KnowledgeDocument, content: str, **fields) 
             {"content": "This content is already in the knowledge base."}
         )
     changed = checksum != document.checksum
+    previous = (document.content or "").strip()
     document.content = normalized
     document.checksum = checksum
     update_fields = ["content", "checksum", "updated_at"]
     for name, value in fields.items():
         setattr(document, name, value)
         update_fields.append(name)
+    if document.source_type == KnowledgeDocument.SourceType.TEXT and (document.notes or "").strip() in {
+        "",
+        previous,
+    }:
+        if (document.notes or "") != normalized:
+            document.notes = normalized
+            update_fields.append("notes")
+            changed = True
+    if changed:
+        document.summary = ""
+        update_fields.append("summary")
     document.save(update_fields=update_fields)
     return changed
 
@@ -405,12 +502,14 @@ def replace_image_document(document: KnowledgeDocument, data: bytes, **fields) -
         raise serializers.ValidationError({"file": "This file is already in the knowledge base."})
     document.chunks.all().delete()
     document.content = ""
+    document.summary = ""
     document.checksum = checksum
     document.status = KnowledgeDocument.Status.READY
     document.error_message = ""
     document.metadata = {"characters": 0, "chunk_count": 0}
     update_fields = [
         "content",
+        "summary",
         "checksum",
         "status",
         "error_message",
@@ -423,6 +522,125 @@ def replace_image_document(document: KnowledgeDocument, data: bytes, **fields) -
     document.save(update_fields=update_fields)
     store_bytes(document, "stored_file", data, fields.get("file_name") or document.file_name)
     return document
+
+
+def indexable_text(document: KnowledgeDocument) -> str:
+    parts = []
+    content = (document.content or "").strip()
+    notes = (document.notes or "").strip()
+    if content:
+        parts.append(content)
+    if notes and notes != content:
+        parts.append(notes)
+    for extra in document.files.order_by("created_at").values_list("extracted_text", flat=True):
+        text = (extra or "").strip()
+        if text and text not in parts:
+            parts.append(text)
+    return "\n\n".join(parts)[:MAX_DOCUMENT_CHARS]
+
+
+def save_notes(document: KnowledgeDocument, notes: str) -> bool:
+    cleaned = notes.strip()
+    if len(cleaned) > MAX_DOCUMENT_CHARS:
+        raise serializers.ValidationError({"notes": "These notes are too long."})
+    owns_body = (
+        document.source_type == KnowledgeDocument.SourceType.TEXT
+        and not document.stored_file
+        and not document.files.exists()
+    )
+    if owns_body:
+        if cleaned == (document.content or "").strip() and cleaned == (document.notes or "").strip():
+            return False
+        if len(cleaned) < 40:
+            raise serializers.ValidationError(
+                {"notes": "Add at least 40 characters of readable text."}
+            )
+        changed = store_document_content(document, cleaned)
+        if (document.notes or "") != cleaned:
+            document.notes = cleaned
+            document.save(update_fields=["notes", "updated_at"])
+            return True
+        return changed
+    if cleaned == (document.notes or ""):
+        return False
+    document.notes = cleaned
+    document.save(update_fields=["notes", "updated_at"])
+    return True
+
+
+def add_document_file(document: KnowledgeDocument, upload) -> KnowledgeFile:
+    attached = document.files.count() + (1 if document.stored_file else 0)
+    if attached >= MAX_DOCUMENT_FILES:
+        raise serializers.ValidationError({"file": "A source can hold 8 files."})
+    raw, file_name, mime_type, text = read_upload(upload)
+    extracted = text.strip()[:MAX_DOCUMENT_CHARS]
+    record = KnowledgeFile(
+        organization=document.organization,
+        document=document,
+        file_name=file_name,
+        mime_type=mime_type,
+        extracted_text=extracted,
+    )
+    record.full_clean()
+    record.save()
+    store_bytes(record, "stored_file", raw, file_name)
+    return record
+
+
+def source_material(document: KnowledgeDocument) -> str:
+    parts = []
+    content = (document.content or "").strip()
+    if content:
+        parts.append(content)
+    for extra in document.files.order_by("created_at").values_list("extracted_text", flat=True):
+        text = (extra or "").strip()
+        if text and text not in parts:
+            parts.append(text)
+    return "\n\n".join(parts)[:8000]
+
+
+def clip_summary(text: str) -> str:
+    compact = " ".join((text or "").split())
+    if not compact:
+        return ""
+    sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", compact) if part.strip()]
+    chosen = " ".join(sentences[:3])
+    if len(chosen) > 280:
+        trimmed = chosen[:277].rsplit(" ", 1)[0].rstrip(".,;:")
+        chosen = f"{trimmed}."
+    return chosen
+
+
+def write_summary(document: KnowledgeDocument) -> str:
+    material = source_material(document) or (document.notes or "").strip()
+    if not material:
+        document.summary = ""
+        document.save(update_fields=["summary", "updated_at"])
+        return ""
+    try:
+        drafted = request_summary(material)
+    except KnowledgeAIError:
+        drafted = material
+    summary = clip_summary(drafted)
+    document.summary = summary
+    document.save(update_fields=["summary", "updated_at"])
+    return summary
+
+
+def draft_notes(document: KnowledgeDocument, request_text: str) -> str:
+    cleaned = request_text.strip()
+    if len(cleaned) < 3:
+        raise serializers.ValidationError({"request": "Describe what the notes should say."})
+    if len(cleaned) > 1000:
+        raise serializers.ValidationError({"request": "Keep the request under 1000 characters."})
+    material = source_material(document)
+    try:
+        draft = request_note_draft(material, cleaned, document.notes or "")
+    except KnowledgeAIError as exc:
+        raise serializers.ValidationError(
+            {"request": "The assistant could not write those notes."}
+        ) from exc
+    return draft.strip()[:MAX_DOCUMENT_CHARS]
 
 
 def clear_stored_file(document: KnowledgeDocument) -> None:
@@ -557,6 +775,73 @@ def _pdf_text(data: bytes) -> str:
         return "\n".join(page.extract_text() or "" for page in reader.pages)
     except Exception as exc:
         raise serializers.ValidationError({"file": "The PDF could not be read."}) from exc
+
+
+def docx_html(data: bytes, title: str) -> str:
+    try:
+        from docx import Document
+        from docx.oxml.ns import qn
+        from docx.table import Table
+        from docx.text.paragraph import Paragraph
+    except ImportError as exc:
+        raise serializers.ValidationError({"file": "Word import is unavailable."}) from exc
+    try:
+        document = Document(BytesIO(data))
+    except Exception as exc:
+        raise serializers.ValidationError({"file": "The Word document could not be read."}) from exc
+    blocks = []
+    for child in document.element.body.iterchildren():
+        if child.tag == qn("w:p"):
+            block = _paragraph_html(Paragraph(child, document))
+        elif child.tag == qn("w:tbl"):
+            block = _table_html(Table(child, document))
+        else:
+            block = ""
+        if block:
+            blocks.append(block)
+    body = "\n".join(blocks) or "<p>This document has no readable text.</p>"
+    safe_title = escape(title or "Document")
+    return (
+        "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
+        f"<title>{safe_title}</title>"
+        "<style>body{max-width:760px;margin:40px auto;padding:0 20px;"
+        "color:#1a1d2b;font:16px/1.5 sans-serif}"
+        "table{border-collapse:collapse;width:100%}"
+        "td{border:1px solid #e4e7ee;padding:6px 8px;vertical-align:top}</style>"
+        f"</head><body><h1>{safe_title}</h1>{body}</body></html>"
+    )
+
+
+def _paragraph_html(paragraph) -> str:
+    inner = "".join(_run_html(run) for run in paragraph.runs).strip()
+    if not inner:
+        inner = escape(paragraph.text or "").strip()
+    if not inner:
+        return ""
+    name = paragraph.style.name.lower() if paragraph.style is not None and paragraph.style.name else ""
+    tag = "h2" if name == "heading 1" else "h3" if name.startswith("heading") else "p"
+    return f"<{tag}>{inner}</{tag}>"
+
+
+def _run_html(run) -> str:
+    text = escape(run.text or "")
+    if not text:
+        return ""
+    if run.bold:
+        text = f"<strong>{text}</strong>"
+    if run.italic:
+        text = f"<em>{text}</em>"
+    return text
+
+
+def _table_html(table) -> str:
+    rows = []
+    for row in table.rows:
+        cells = "".join(
+            f"<td>{escape(cell.text or '').replace(chr(10), '<br>')}</td>" for cell in row.cells
+        )
+        rows.append(f"<tr>{cells}</tr>")
+    return f"<table>{''.join(rows)}</table>"
 
 
 def _docx_text(data: bytes) -> str:

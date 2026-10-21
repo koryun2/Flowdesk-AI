@@ -1,5 +1,5 @@
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { BookOpenCheck, CheckCircle2, Inbox, Plus, Sparkles } from 'lucide-react'
+import { BookOpenCheck, CheckCircle2, Plus, Sparkles } from 'lucide-react'
 import { useState } from 'react'
 import type { FormEvent } from 'react'
 import { Button, Page, PageHeader } from '../../components/ui'
@@ -11,7 +11,7 @@ import { AddSourceForm } from './AddSourceForm'
 import { EditSourceForm } from './EditSourceForm'
 import { KnowledgeAsk } from './KnowledgeAsk'
 import { KnowledgeLibrary } from './KnowledgeLibrary'
-import { KnowledgeStats, QueueCard, StatCard } from './KnowledgePage.styles'
+import { KnowledgeStats, StatCard } from './KnowledgePage.styles'
 
 export function KnowledgePage() {
   const { notify } = useToast()
@@ -39,12 +39,6 @@ export function KnowledgePage() {
     queryFn: () => workspaceApi.documentSummary(),
     refetchInterval: documents.some((document) => document.status === 'processing') ? 2000 : false,
   })
-  const jobs = useQuery({
-    queryKey: ['redis-jobs'],
-    queryFn: () => workspaceApi.listJobs(),
-    refetchInterval: (query) => ((query.state.data?.queued ?? 0) > 0 ? 2000 : 5000),
-  })
-  const latestJob = jobs.data?.jobs[0]
   const catalog = useQuery({
     queryKey: ['documents', ''],
     queryFn: () => workspaceApi.listDocuments(),
@@ -112,20 +106,6 @@ export function KnowledgePage() {
           </div>
         </StatCard>
       </KnowledgeStats>
-
-      <QueueCard>
-        <span>
-          <Inbox size={19} />
-        </span>
-        <div>
-          <strong>{jobs.data ? `${jobs.data.queued} waiting in Redis` : 'Redis queue'}</strong>
-          <small>
-            {latestJob
-              ? `${latestJob.label} is ${latestJob.status}`
-              : 'Indexing and ticket analysis run here'}
-          </small>
-        </div>
-      </QueueCard>
 
       <KnowledgeAsk
         answer={answerMutation.data}

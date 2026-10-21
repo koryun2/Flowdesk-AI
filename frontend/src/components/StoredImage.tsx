@@ -61,6 +61,36 @@ export function StoredImage({
   return <Picture $variant={variant} alt={alt} src={url} />
 }
 
+function viewType(fileName: string, header: string) {
+  const name = fileName.toLowerCase()
+  if (name.endsWith('.pdf')) return 'application/pdf'
+  if (name.endsWith('.png')) return 'image/png'
+  if (name.endsWith('.jpg') || name.endsWith('.jpeg')) return 'image/jpeg'
+  if (name.endsWith('.webp')) return 'image/webp'
+  if (name.endsWith('.gif')) return 'image/gif'
+  if (name.endsWith('.html') || name.endsWith('.htm')) return 'text/plain;charset=utf-8'
+  if (/\.(txt|md|markdown|csv|json)$/.test(name)) return 'text/plain;charset=utf-8'
+  return header.split(';')[0] || 'application/octet-stream'
+}
+
+export async function openStoredFile(path: string, fileName: string) {
+  const popup = window.open('about:blank', '_blank')
+  if (!popup) {
+    await downloadStoredFile(path, fileName)
+    return
+  }
+  popup.document.write('<p style="font-family:sans-serif">Opening…</p>')
+  const response = await authorizedFetch(path)
+  if (!response.ok) {
+    popup.close()
+    throw new Error('The file could not be opened')
+  }
+  const blob = new Blob([await response.arrayBuffer()], {
+    type: viewType(fileName, response.headers.get('content-type') || ''),
+  })
+  popup.location.href = URL.createObjectURL(blob)
+}
+
 export async function downloadStoredFile(path: string, fileName: string) {
   const response = await authorizedFetch(path)
   if (!response.ok) return

@@ -550,6 +550,50 @@ class KnowledgeApiTests(APITestCase):
         self.assertEqual(kept.status_code, status.HTTP_201_CREATED)
         self.assertEqual(duplicate.status_code, status.HTTP_400_BAD_REQUEST)
 
+    def test_asking_for_resumes_finds_the_resume_by_its_title(self):
+        created = self.client.post(
+            reverse("document-list"),
+            {
+                "title": "Resume",
+                "source_type": "text",
+                "content": (
+                    "Koryun Hayryan studied economics at Yerevan State University "
+                    "and works as a frontend developer."
+                ),
+            },
+            format="json",
+        )
+        other = self.client.post(
+            reverse("document-list"),
+            {
+                "title": "Billing and subscription FAQ",
+                "source_type": "text",
+                "content": "Invoices are billed monthly and downloaded from the billing page.",
+            },
+            format="json",
+        )
+        listed = self.client.post(
+            reverse("document-ask"),
+            {"question": "bring all resumes from knowledge base"},
+            format="json",
+        )
+        short = self.client.post(
+            reverse("document-ask"),
+            {"question": "all resumes?"},
+            format="json",
+        )
+        scoped = self.client.post(
+            reverse("document-ask"),
+            {"question": "all resumes?", "document_ids": [other.data["id"]]},
+            format="json",
+        )
+
+        self.assertEqual(created.status_code, status.HTTP_201_CREATED)
+        self.assertIn("Yerevan State University", listed.data["answer"])
+        self.assertEqual(listed.data["sources"][0]["title"], "Resume")
+        self.assertEqual(short.data["sources"][0]["document_id"], created.data["id"])
+        self.assertEqual(scoped.data["sources"], [])
+
     def test_questions_can_use_several_sections_and_selected_sources(self):
         resume = self.client.post(
             reverse("document-list"),
@@ -709,6 +753,126 @@ class KnowledgeApiTests(APITestCase):
         self.assertEqual(refreshed.data["source_type"], "url")
         self.assertIn("five minutes", body.data["content"])
         self.assertNotIn("signing secret", body.data["content"])
+
+    def test_notes_stay_separate_from_the_file(self):
+        created = self.client.post(
+            reverse("document-list"),
+            {
+                "title": "Webhook file",
+                "source_type": "file",
+                "file": SimpleUploadedFile(
+                    "hooks.txt",
+                    b"Webhook deliveries retry after a failed response. Confirm the endpoint returns success.",
+                    content_type="text/plain",
+                ),
+            },
+            format="multipart",
+        )
+        updated = self.client.patch(
+            reverse("document-detail", args=[created.data["id"]]),
+            {"notes": "Check the signing header before retrying a delivery from the queue."},
+            format="json",
+        )
+        body = self.client.get(reverse("document-content", args=[created.data["id"]]))
+
+        self.assertEqual(created.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(updated.status_code, status.HTTP_200_OK)
+        self.assertEqual(body.data["notes"], "Check the signing header before retrying a delivery from the queue.")
+        self.assertIn("Webhook deliveries", body.data["content"])
+        self.assertNotIn("signing header", body.data["content"])
+        self.assertTrue(body.data["has_file"])
+        self.assertEqual(body.data["files"][0]["file_name"], "hooks.txt")
+        self.assertTrue(body.data["files"][0]["primary"])
+
+    def test_added_files_keep_their_text_out_of_the_notes(self):
+        from knowledge.models import KnowledgeChunk
+
+        created = self.client.post(
+            reverse("document-list"),
+            {"title": "Billing notes", "source_type": "text", "content": EXPORT_GUIDE},
+            format="json",
+        )
+        added = self.client.post(
+            reverse("document-files", args=[created.data["id"]]),
+            {
+                "file": SimpleUploadedFile(
+                    "refunds.txt",
+                    b"The refund window stays open for fourteen days after the charge.",
+                    content_type="text/plain",
+                ),
+            },
+            format="multipart",
+        )
+        body = self.client.get(reverse("document-content", args=[created.data["id"]]))
+
+        self.assertEqual(added.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(body.data["notes"], EXPORT_GUIDE)
+        self.assertNotIn("fourteen days", body.data["notes"])
+        self.assertEqual(body.data["files"][0]["file_name"], "refunds.txt")
+        self.assertFalse(body.data["files"][0]["primary"])
+        self.assertTrue(
+            KnowledgeChunk.objects.filter(
+                document_id=created.data["id"],
+                content__icontains="fourteen days",
+            ).exists()
+        )
+
+    def test_summary_is_at_most_three_sentences(self):
+        created = self.client.post(
+            reverse("document-list"),
+            {"title": "Billing notes", "source_type": "text", "content": EXPORT_GUIDE},
+            format="json",
+        )
+        with patch(
+            "knowledge.services.request_summary",
+            return_value="Alpha ends. Beta ends. Gamma ends. Delta ends. Epsilon ends.",
+        ):
+            summary = self.client.post(reverse("document-summarize", args=[created.data["id"]]))
+        with patch(
+            "knowledge.services.request_summary",
+            side_effect=KnowledgeAIError("down"),
+        ):
+            fallback = self.client.post(reverse("document-summarize", args=[created.data["id"]]))
+
+        self.assertEqual(summary.status_code, status.HTTP_200_OK)
+        self.assertEqual(summary.data["summary"], "Alpha ends. Beta ends. Gamma ends.")
+        self.assertLessEqual(len(summary.data["summary"]), 280)
+        self.assertEqual(fallback.status_code, status.HTTP_200_OK)
+        self.assertLessEqual(len(fallback.data["summary"]), 280)
+        self.assertNotIn("\n", fallback.data["summary"])
+
+    def test_word_files_open_as_a_page(self):
+        from io import BytesIO
+
+        from docx import Document
+
+        buffer = BytesIO()
+        document = Document()
+        document.add_paragraph(
+            "Sign in from the MSport page and reset the password from the account form."
+        )
+        document.save(buffer)
+        created = self.client.post(
+            reverse("document-list"),
+            {
+                "title": "MSport login",
+                "source_type": "file",
+                "file": SimpleUploadedFile(
+                    "login.docx",
+                    buffer.getvalue(),
+                    content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                ),
+            },
+            format="multipart",
+        )
+        preview = self.client.get(reverse("document-file", args=[created.data["id"]]), {"view": "html"})
+        raw = self.client.get(reverse("document-file", args=[created.data["id"]]))
+
+        self.assertEqual(created.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(preview.status_code, status.HTTP_200_OK)
+        self.assertIn("text/html", preview["Content-Type"])
+        self.assertIn("MSport page", preview.content.decode())
+        self.assertTrue(_file_bytes(raw).startswith(b"PK"))
 
 
 class FakeRedis:

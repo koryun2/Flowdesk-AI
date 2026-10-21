@@ -195,7 +195,6 @@ export const KnowledgeAnswer = styled.div`
     color: #4b5265;
     font-size: 11px;
     line-height: 1.65;
-    white-space: pre-wrap;
   }
 `
 
@@ -393,18 +392,10 @@ export const TitleButton = styled.button`
   font-size: 10px;
   font-weight: 700;
   text-align: left;
-`
 
-export const TitleInput = styled.input`
-  width: 100%;
-  padding: 0 0 2px;
-  border: 0;
-  border-bottom: 1px solid ${({ theme }) => theme.primary};
-  background: transparent;
-  color: inherit;
-  font-size: 10px;
-  font-weight: 700;
-  outline: none;
+  &:hover {
+    color: ${({ theme }) => theme.primary};
+  }
 `
 
 export const DocumentCol = styled.div`
@@ -557,4 +548,200 @@ export const FileDropzone = styled.label`
   input {
     display: none;
   }
+`
+
+export const EditorStack = styled.div`
+  display: grid;
+  gap: 14px;
+`
+
+export const SourceTitle = styled.h3`
+  margin: 0;
+  color: ${({ theme }) => theme.text};
+  font-size: 18px;
+  font-weight: 700;
+`
+
+export const SourceTitleInput = styled.input`
+  width: 100%;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: ${({ theme }) => theme.text};
+  font-size: 18px;
+  font-weight: 700;
+`
+
+export const SourceSummary = styled.p`
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  color: ${({ theme }) => theme.textSecondary};
+  font-size: 13px;
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+`
+
+export const SourceFiles = styled.div`
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+`
+
+export const SourceFile = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  padding: 4px 8px 4px 4px;
+  border: 1px solid ${({ theme }) => theme.border};
+  border-radius: 8px;
+
+  span {
+    overflow: hidden;
+    font-size: 11px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+`
+
+export const SourceFileOpen = styled.button`
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  color: ${({ theme }) => theme.primary};
+  background: transparent;
+  cursor: pointer;
+`
+
+export const SourceFileRemove = styled.button`
+  border: 0;
+  color: ${({ theme }) => theme.textTertiary};
+  background: transparent;
+`
+
+export const HiddenFileInput = styled.input`
+  display: none;
+`
+
+export const NoteRequest = styled.form`
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+
+  input {
+    min-width: 0;
+    flex: 1;
+    height: 34px;
+    padding: 0 11px;
+    border: 1px solid ${({ theme }) => theme.borderStrong};
+    border-radius: 8px;
+    outline: 0;
+    font-size: 12px;
+  }
+`
+
+export const NotesShell = styled.div`
+  overflow: hidden;
+  border: 1px solid ${({ theme }) => theme.borderStrong};
+  border-radius: 8px;
+  background: #fff;
+`
+
+export const NotesToolbar = styled.div`
+  display: flex;
+  gap: 4px;
+  padding: 6px;
+  border-bottom: 1px solid ${({ theme }) => theme.border};
+`
+
+export const NotesTool = styled.button`
+  min-width: 28px;
+  height: 28px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 6px;
+  color: ${({ theme }) => theme.textSecondary};
+  background: transparent;
+  font-size: 11px;
+  font-weight: 700;
+
+  &:hover {
+    color: ${({ theme }) => theme.primary};
+    background: ${({ theme }) => theme.primarySoft};
+  }
+`
+
+export const NotesSurface = styled.div`
+  min-height: 180px;
+  padding: 12px;
+  outline: 0;
+  color: ${({ theme }) => theme.text};
+  font-size: 13px;
+  line-height: 1.5;
+
+  &:empty:before {
+    content: 'Write notes';
+    color: ${({ theme }) => theme.textTertiary};
+  }
+
+  h1,
+  h2,
+  p,
+  ul,
+  ol {
+    margin: 0 0 8px;
+  }
+
+  h1 {
+    font-size: 18px;
+  }
+
+  h2 {
+    font-size: 15px;
+  }
+
+  ul,
+  ol {
+    padding-left: 18px;
+  }
+`
+
+export const NotesRead = styled.div`
+  min-height: 120px;
+  color: ${({ theme }) => theme.text};
+  font-size: 13px;
+  line-height: 1.5;
+
+  h1,
+  h2,
+  p,
+  ul,
+  ol {
+    margin: 0 0 8px;
+  }
+
+  h1 {
+    font-size: 18px;
+  }
+
+  h2 {
+    font-size: 15px;
+  }
+
+  ul,
+  ol {
+    padding-left: 18px;
+  }
+`
+
+export const NotesEmpty = styled.p`
+  margin: 0;
+  color: ${({ theme }) => theme.textTertiary};
+  font-size: 13px;
 `

@@ -11,6 +11,10 @@ def knowledge_upload_path(instance, filename: str) -> str:
     return f"knowledge/{instance.organization_id}/{instance.id}/{filename}"
 
 
+def knowledge_file_path(instance, filename: str) -> str:
+    return f"knowledge/{instance.organization_id}/{instance.document_id}/{instance.id}/{filename}"
+
+
 class KnowledgeDocument(TimeStampedUUIDModel):
     class SourceType(models.TextChoices):
         TEXT = "text", "Text"
@@ -44,6 +48,8 @@ class KnowledgeDocument(TimeStampedUUIDModel):
         default=SourceType.TEXT,
     )
     content = models.TextField(blank=True)
+    notes = models.TextField(blank=True)
+    summary = models.TextField(blank=True)
     source_url = models.URLField(blank=True)
     file_name = models.CharField(max_length=255, blank=True)
     mime_type = models.CharField(max_length=120, blank=True)
@@ -91,6 +97,43 @@ class KnowledgeDocument(TimeStampedUUIDModel):
 
     def __str__(self) -> str:
         return self.title
+
+
+class KnowledgeFile(TimeStampedUUIDModel):
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        related_name="knowledge_files",
+    )
+    document = models.ForeignKey(
+        KnowledgeDocument,
+        on_delete=models.CASCADE,
+        related_name="files",
+    )
+    stored_file = models.FileField(upload_to=knowledge_file_path, blank=True, max_length=255)
+    file_name = models.CharField(max_length=255)
+    mime_type = models.CharField(max_length=120, blank=True)
+    extracted_text = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        indexes = [
+            models.Index(fields=["document", "created_at"], name="kfile_document_created_idx"),
+        ]
+
+    def clean(self) -> None:
+        super().clean()
+        if (
+            self.document_id
+            and self.organization_id
+            and self.document.organization_id != self.organization_id
+        ):
+            raise ValidationError(
+                {"document": "The file must belong to the document organization."}
+            )
+
+    def __str__(self) -> str:
+        return self.file_name
 
 
 class KnowledgeChunk(TimeStampedUUIDModel):

@@ -16,9 +16,9 @@ const modalIn = keyframes`
   }
 `
 
-const Backdrop = styled.div`
+const Backdrop = styled.div<{ $layer: number }>`
   position: fixed;
-  z-index: 100;
+  z-index: ${({ $layer }) => $layer};
   inset: 0;
   display: grid;
   place-items: center;
@@ -81,6 +81,7 @@ export function Modal({
   children,
   footer,
   width = 'md',
+  layer = 100,
 }: {
   open: boolean
   onClose: () => void
@@ -89,6 +90,7 @@ export function Modal({
   children: ReactNode
   footer?: ReactNode
   width?: 'sm' | 'md' | 'lg'
+  layer?: number
 }) {
   useEffect(() => {
     if (!open) return
@@ -99,14 +101,14 @@ export function Modal({
     document.body.style.overflow = 'hidden'
     return () => {
       document.removeEventListener('keydown', handleKey)
-      document.body.style.overflow = ''
+      if (!document.querySelector('[role="dialog"]')) document.body.style.overflow = ''
     }
   }, [onClose, open])
 
   if (!open) return null
 
   return (
-    <Backdrop onMouseDown={onClose}>
+    <Backdrop $layer={layer} onMouseDown={onClose}>
       <Dialog
         $width={width}
         aria-describedby={description ? 'modal-description' : undefined}

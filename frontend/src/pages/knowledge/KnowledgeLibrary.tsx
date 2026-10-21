@@ -2,6 +2,8 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   CheckCircle2,
   Clock3,
+  Eye,
+  FilePen,
   FileText,
   Link2,
   Pencil,
@@ -10,6 +12,7 @@ import {
 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
+import { StoredImage } from '../../components/StoredImage'
 import {
   Button,
   EmptyState,
@@ -20,6 +23,7 @@ import {
 import { formatRelative } from '../../lib/utils'
 import { useToast } from '../../providers/toast'
 import { ApiError } from '../../services/authApi'
+import { isImageDocument } from '../../lib/files'
 import { workspaceApi } from '../../services/workspaceApi'
 import type { KnowledgeDocument } from '../../types'
 import {
@@ -35,6 +39,7 @@ import {
   TitleButton,
   TitleInput,
   LibraryHeader,
+  RowActions,
   TableSearch,
   TableSkeleton,
 } from './KnowledgePage.styles'
@@ -47,6 +52,7 @@ type KnowledgeLibraryProps = {
   isError: boolean
   onRetry: () => void
   onAddSource: () => void
+  onOpenSource: (document: KnowledgeDocument) => void
   canEdit: boolean
 }
 
@@ -58,6 +64,7 @@ export function KnowledgeLibrary({
   isError,
   onRetry,
   onAddSource,
+  onOpenSource,
   canEdit,
 }: KnowledgeLibraryProps) {
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -74,7 +81,7 @@ export function KnowledgeLibrary({
           <input
             aria-label="Search knowledge sources"
             onChange={(event) => onSearchChange(event.target.value)}
-            placeholder="Search sources"
+            placeholder="Search titles and text"
             value={search}
           />
         </TableSearch>
@@ -96,13 +103,20 @@ export function KnowledgeLibrary({
         <DocumentList>
           {documents.map((document) => (
             <DocumentRow key={document.id}>
-              <DocumentIcon $sourceType={document.sourceType}>
-                {document.sourceType === 'url' ? (
-                  <Link2 size={19} />
-                ) : (
-                  <FileText size={19} />
-                )}
-              </DocumentIcon>
+              {isImageDocument(document) && document.hasFile ? (
+                <StoredImage
+                  alt={document.fileName || document.title}
+                  path={`/api/v1/documents/${document.id}/file/`}
+                />
+              ) : (
+                <DocumentIcon $sourceType={document.sourceType}>
+                  {document.sourceType === 'url' ? (
+                    <Link2 size={19} />
+                  ) : (
+                    <FileText size={19} />
+                  )}
+                </DocumentIcon>
+              )}
               <DocumentCol>
                 <SourceTitle
                   canEdit={canEdit}
@@ -118,8 +132,17 @@ export function KnowledgeLibrary({
                 </small>
               </DocumentCol>
               <DocumentChunks>
-                <strong>{document.chunks}</strong>
-                <small>chunks</small>
+                {isImageDocument(document) ? (
+                  <>
+                    <strong>Image</strong>
+                    <small>file</small>
+                  </>
+                ) : (
+                  <>
+                    <strong>{document.chunks}</strong>
+                    <small>chunks</small>
+                  </>
+                )}
               </DocumentChunks>
               <DocumentStatusWrap>
                 <DocumentStatus $status={document.status}>
@@ -135,14 +158,22 @@ export function KnowledgeLibrary({
                 <strong>{formatRelative(document.updatedAt)}</strong>
                 <small>by {document.createdBy}</small>
               </DocumentUpdated>
-              {canEdit ? (
+              <RowActions>
+                {canEdit ? (
+                  <IconButton
+                    label={`Rename ${document.title}`}
+                    onClick={() => setEditingId(document.id)}
+                  >
+                    <Pencil size={17} />
+                  </IconButton>
+                ) : null}
                 <IconButton
-                  label={`Rename ${document.title}`}
-                  onClick={() => setEditingId(document.id)}
+                  label={`${canEdit ? 'Update' : 'View'} ${document.title}`}
+                  onClick={() => onOpenSource(document)}
                 >
-                  <Pencil size={17} />
+                  {canEdit ? <FilePen size={17} /> : <Eye size={17} />}
                 </IconButton>
-              ) : null}
+              </RowActions>
             </DocumentRow>
           ))}
         </DocumentList>

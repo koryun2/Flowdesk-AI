@@ -1,7 +1,8 @@
 import { Send, Sparkles } from 'lucide-react'
 import type { FormEvent } from 'react'
 import { Button, Skeleton } from '../../components/ui'
-import type { KnowledgeAnswer as KnowledgeAnswerData } from '../../types'
+import { isImageDocument } from '../../lib/files'
+import type { KnowledgeAnswer as KnowledgeAnswerData, KnowledgeDocument } from '../../types'
 import {
   AnswerLabel,
   AnswerLoading,
@@ -12,6 +13,9 @@ import {
   KnowledgeAnswer,
   QuestionForm,
   QuestionInput,
+  ScopeNote,
+  SourceChip,
+  SourceScope,
 } from './KnowledgePage.styles'
 
 type KnowledgeAskProps = {
@@ -22,6 +26,9 @@ type KnowledgeAskProps = {
   answer: KnowledgeAnswerData | undefined
   submittedQuestion: string
   onCitationClick: (title: string) => void
+  documents: KnowledgeDocument[]
+  selectedIds: string[]
+  onToggleSource: (id: string) => void
 }
 
 export function KnowledgeAsk({
@@ -32,7 +39,13 @@ export function KnowledgeAsk({
   answer,
   submittedQuestion,
   onCitationClick,
+  documents,
+  selectedIds,
+  onToggleSource,
 }: KnowledgeAskProps) {
+  const ready = documents.filter(
+    (document) => document.status === 'ready' && !isImageDocument(document),
+  )
   return (
     <AskCard>
       <AskIntro>
@@ -41,9 +54,30 @@ export function KnowledgeAsk({
         </span>
         <div>
           <h2>Ask your knowledge base</h2>
-          <p>Answers are grounded in indexed sources and include citations.</p>
+          <p>Answers stay inside the sources you choose and include citations.</p>
         </div>
       </AskIntro>
+      {ready.length ? (
+        <>
+          <SourceScope>
+            {ready.map((document) => (
+              <SourceChip
+                $active={selectedIds.includes(document.id)}
+                key={document.id}
+                onClick={() => onToggleSource(document.id)}
+                type="button"
+              >
+                {document.title}
+              </SourceChip>
+            ))}
+          </SourceScope>
+          <ScopeNote>
+            {selectedIds.length
+              ? `Searching ${selectedIds.length} selected source${selectedIds.length === 1 ? '' : 's'}`
+              : 'No source selected, so this question searches the whole library'}
+          </ScopeNote>
+        </>
+      ) : null}
       <QuestionForm onSubmit={onSubmit}>
         <QuestionInput
           aria-label="Ask your knowledge base"

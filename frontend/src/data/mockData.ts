@@ -182,6 +182,7 @@ export const tickets: Ticket[] = [
         createdAt: ago(1),
       },
     ],
+    attachments: [],
     activity: [
       {
         id: 'ac-1',
@@ -232,6 +233,7 @@ export const tickets: Ticket[] = [
     createdAt: ago(7),
     updatedAt: ago(2),
     comments: [],
+    attachments: [],
     activity: [
       {
         id: 'ac-4',
@@ -267,6 +269,7 @@ export const tickets: Ticket[] = [
     createdAt: ago(10),
     updatedAt: ago(10),
     comments: [],
+    attachments: [],
     activity: [],
     analysis: {
       category: 'feature_request',
@@ -293,6 +296,7 @@ export const tickets: Ticket[] = [
     createdAt: ago(16),
     updatedAt: ago(5),
     comments: [],
+    attachments: [],
     activity: [],
     analysis: {
       category: 'billing',
@@ -319,6 +323,7 @@ export const tickets: Ticket[] = [
     createdAt: ago(22),
     updatedAt: ago(12),
     comments: [],
+    attachments: [],
     activity: [],
     analysis: {
       category: 'general_inquiry',
@@ -345,6 +350,7 @@ export const tickets: Ticket[] = [
     createdAt: ago(28),
     updatedAt: ago(8),
     comments: [],
+    attachments: [],
     activity: [],
   },
   {
@@ -361,6 +367,7 @@ export const tickets: Ticket[] = [
     createdAt: ago(34),
     updatedAt: ago(34),
     comments: [],
+    attachments: [],
     activity: [],
   },
   {
@@ -377,6 +384,7 @@ export const tickets: Ticket[] = [
     createdAt: ago(42),
     updatedAt: ago(14),
     comments: [],
+    attachments: [],
     activity: [],
   },
   {
@@ -393,6 +401,7 @@ export const tickets: Ticket[] = [
     createdAt: ago(51),
     updatedAt: ago(30),
     comments: [],
+    attachments: [],
     activity: [],
   },
   {
@@ -409,6 +418,7 @@ export const tickets: Ticket[] = [
     createdAt: ago(72),
     updatedAt: ago(40),
     comments: [],
+    attachments: [],
     activity: [],
   },
 ]

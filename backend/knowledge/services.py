@@ -7,11 +7,13 @@ from io import BytesIO
 from pathlib import Path
 from urllib import error, request
 from urllib.parse import urlparse
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from django.db import transaction
 from django.utils.text import slugify
 from rest_framework import serializers
+
+from core.files import MAX_UPLOAD_BYTES, image_mime, read_limited, safe_name, store_bytes
 
 from .client import KnowledgeAIError, request_answer, request_embeddings
 from .local_ai import (
@@ -39,10 +41,10 @@ logger = logging.getLogger("flowdesk.api")
 
 MAX_DOCUMENT_CHARS = 60_000
 MAX_CHUNKS = 80
-MAX_UPLOAD_BYTES = 8 * 1024 * 1024
 MIN_RELEVANCE = 0.15
 MAX_CONTEXT_CHUNKS = 3
-TEXT_EXTENSIONS = {".txt", ".md", ".markdown"}
+TEXT_EXTENSIONS = {".txt", ".md", ".markdown", ".csv", ".json"}
+HTML_EXTENSIONS = {".html", ".htm"}
 
 
 def index_document(document: KnowledgeDocument, *, remote: bool = True) -> KnowledgeDocument:
@@ -88,15 +90,18 @@ def index_document(document: KnowledgeDocument, *, remote: bool = True) -> Knowl
     return document
 
 
-def answer_question(organization, question: str) -> dict:
+def answer_question(organization, question: str, document_ids=None) -> dict:
     vector, model_name = embed_query(question)
-    matches = ranked_chunks(organization, question, vector, model_name)
+    matches = ranked_chunks(organization, question, vector, model_name, document_ids)
     if not matches and model_name != LOCAL_EMBEDDING_MODEL:
         vector = embed_text(question)
-        matches = ranked_chunks(organization, question, vector, LOCAL_EMBEDDING_MODEL)
+        model_name = LOCAL_EMBEDDING_MODEL
+        matches = ranked_chunks(organization, question, vector, model_name, document_ids)
     hints = detect_sections(question)
-    if len(hints) == 1 and not is_complex_question(question):
-        direct = direct_section_answer(organization, question, hints[0], vector, model_name)
+    if hints and len(hints) <= 3 and not is_complex_question(question):
+        direct = direct_sections_answer(
+            organization, question, hints, vector, model_name, document_ids
+        )
         if direct:
             return direct
     contexts = context_sources(matches)
@@ -146,6 +151,37 @@ def prepare_document(organization, title: str, source_type: str, content: str, *
     return document
 
 
+def prepare_image_document(
+    organization,
+    title: str,
+    data: bytes,
+    *,
+    file_name: str,
+    mime_type: str,
+    created_by=None,
+) -> KnowledgeDocument:
+    checksum = hashlib.sha256(data).hexdigest()
+    if KnowledgeDocument.objects.filter(organization=organization, checksum=checksum).exists():
+        raise serializers.ValidationError({"file": "This file is already in the knowledge base."})
+    document = KnowledgeDocument(
+        organization=organization,
+        created_by=created_by,
+        title=title.strip(),
+        slug=unique_slug(organization, title),
+        source_type=KnowledgeDocument.SourceType.FILE,
+        content="",
+        file_name=file_name,
+        mime_type=mime_type,
+        checksum=checksum,
+        status=KnowledgeDocument.Status.READY,
+        metadata={"characters": 0, "chunk_count": 0},
+    )
+    document.full_clean()
+    document.save()
+    store_bytes(document, "stored_file", data, file_name)
+    return document
+
+
 def embed_document(pieces: list[str], *, remote: bool) -> tuple[list[list[float]], str]:
     if remote:
         try:
@@ -190,14 +226,66 @@ def cited_sources(matches) -> list[dict]:
     return sources
 
 
-def direct_section_answer(organization, question: str, section: str, vector: list[float], model_name: str):
+def selected_documents(organization, raw) -> list[UUID] | None:
+    if raw in (None, ""):
+        return None
+    if not isinstance(raw, list):
+        raise serializers.ValidationError({"document_ids": "Choose sources from this workspace."})
+    if len(raw) > 20:
+        raise serializers.ValidationError({"document_ids": "Choose 20 sources or fewer."})
+    if not raw:
+        return None
+    ids = []
+    for item in raw:
+        try:
+            ids.append(UUID(str(item)))
+        except (TypeError, ValueError) as exc:
+            raise serializers.ValidationError(
+                {"document_ids": "Choose sources from this workspace."}
+            ) from exc
+    found = set(
+        KnowledgeDocument.objects.filter(organization=organization, id__in=ids).values_list(
+            "id", flat=True
+        )
+    )
+    if found != set(ids):
+        raise serializers.ValidationError({"document_ids": "Choose sources from this workspace."})
+    return ids
+
+
+def direct_sections_answer(organization, question, sections, vector, model_name, document_ids=None):
+    answers = []
+    sources = []
+    for section in sections:
+        direct = direct_section_answer(
+            organization, question, section, vector, model_name, document_ids
+        )
+        if not direct:
+            return None
+        answers.append(direct["answer"])
+        for source in direct["sources"]:
+            current = next(
+                (item for item in sources if item["document_id"] == source["document_id"]),
+                None,
+            )
+            if current is None:
+                sources.append(dict(source))
+                continue
+            if source["excerpt"] not in current["excerpt"]:
+                current["excerpt"] = f"{current['excerpt']}\n\n{source['excerpt']}"[:500]
+            current["relevance"] = max(current["relevance"], source["relevance"])
+    return {
+        "answer": "\n\n".join(answers),
+        "sources": sources,
+        "model_name": LOCAL_ANSWER_MODEL,
+    }
+
+
+def direct_section_answer(
+    organization, question: str, section: str, vector: list[float], model_name: str, document_ids=None
+):
     chunks = list(
-        KnowledgeChunk.objects.filter(
-            organization=organization,
-            section=section,
-            embedding_model=model_name,
-            document__status=KnowledgeDocument.Status.READY,
-        ).select_related("document")
+        _chunk_base(organization, model_name, document_ids).filter(section=section)
     )
     if not chunks:
         return None
@@ -237,13 +325,9 @@ def direct_section_answer(organization, question: str, section: str, vector: lis
     }
 
 
-def ranked_chunks(organization, question: str, vector: list[float], model_name: str):
+def ranked_chunks(organization, question: str, vector: list[float], model_name: str, document_ids=None):
     hints = set(detect_sections(question))
-    base = KnowledgeChunk.objects.filter(
-        organization=organization,
-        embedding_model=model_name,
-        document__status=KnowledgeDocument.Status.READY,
-    ).select_related("document")
+    base = _chunk_base(organization, model_name, document_ids)
     pool = {}
     candidate_ids = nearest_chunk_ids(organization.id, vector, model_name)
     candidates = base.filter(id__in=candidate_ids) if candidate_ids else base
@@ -272,6 +356,83 @@ def ranked_chunks(organization, question: str, vector: list[float], model_name: 
     return ranked[:MAX_CONTEXT_CHUNKS]
 
 
+def _chunk_base(organization, model_name: str, document_ids):
+    base = KnowledgeChunk.objects.filter(
+        organization=organization,
+        embedding_model=model_name,
+        document__status=KnowledgeDocument.Status.READY,
+    ).select_related("document")
+    if document_ids:
+        base = base.filter(document_id__in=document_ids)
+    return base
+
+
+def store_document_content(document: KnowledgeDocument, content: str, **fields) -> bool:
+    normalized = content.strip()
+    if len(normalized) < 40:
+        raise serializers.ValidationError({"content": "Add at least 40 characters of readable text."})
+    if len(normalized) > MAX_DOCUMENT_CHARS:
+        raise serializers.ValidationError(
+            {"content": "This document is too long to index. Split it into smaller sources."}
+        )
+    checksum = hashlib.sha256(normalized.encode()).hexdigest()
+    if (
+        KnowledgeDocument.objects.filter(organization=document.organization, checksum=checksum)
+        .exclude(pk=document.pk)
+        .exists()
+    ):
+        raise serializers.ValidationError(
+            {"content": "This content is already in the knowledge base."}
+        )
+    changed = checksum != document.checksum
+    document.content = normalized
+    document.checksum = checksum
+    update_fields = ["content", "checksum", "updated_at"]
+    for name, value in fields.items():
+        setattr(document, name, value)
+        update_fields.append(name)
+    document.save(update_fields=update_fields)
+    return changed
+
+
+def replace_image_document(document: KnowledgeDocument, data: bytes, **fields) -> KnowledgeDocument:
+    checksum = hashlib.sha256(data).hexdigest()
+    if (
+        KnowledgeDocument.objects.filter(organization=document.organization, checksum=checksum)
+        .exclude(pk=document.pk)
+        .exists()
+    ):
+        raise serializers.ValidationError({"file": "This file is already in the knowledge base."})
+    document.chunks.all().delete()
+    document.content = ""
+    document.checksum = checksum
+    document.status = KnowledgeDocument.Status.READY
+    document.error_message = ""
+    document.metadata = {"characters": 0, "chunk_count": 0}
+    update_fields = [
+        "content",
+        "checksum",
+        "status",
+        "error_message",
+        "metadata",
+        "updated_at",
+    ]
+    for name, value in fields.items():
+        setattr(document, name, value)
+        update_fields.append(name)
+    document.save(update_fields=update_fields)
+    store_bytes(document, "stored_file", data, fields.get("file_name") or document.file_name)
+    return document
+
+
+def clear_stored_file(document: KnowledgeDocument) -> None:
+    if not document.stored_file:
+        return
+    document.stored_file.delete(save=False)
+    document.stored_file = ""
+    document.save(update_fields=["stored_file", "updated_at"])
+
+
 def rename_document(document: KnowledgeDocument, title: str) -> KnowledgeDocument:
     cleaned = title.strip()
     if not 3 <= len(cleaned) <= 240:
@@ -298,24 +459,29 @@ def unique_slug(organization, title: str, *, exclude=None) -> str:
     return slug
 
 
-def extract_upload(upload) -> tuple[str, str, str]:
-    if upload.size > MAX_UPLOAD_BYTES:
-        raise serializers.ValidationError({"file": "Files must be 8 MB or smaller."})
-    name = Path(upload.name or "document.txt").name
+def read_upload(upload) -> tuple[bytes, str, str, str]:
+    if upload is None:
+        raise serializers.ValidationError({"file": "Choose a file."})
+    data = read_limited(upload)
+    name = safe_name(getattr(upload, "name", "") or "document.txt")
+    mime = image_mime(name)
+    if mime:
+        return data, name, mime, ""
     suffix = Path(name).suffix.lower()
-    data = upload.read()
     if suffix in TEXT_EXTENSIONS:
         text = data.decode("utf-8", errors="replace")
+    elif suffix in HTML_EXTENSIONS:
+        text = _html_text(data.decode("utf-8", errors="replace"))
     elif suffix == ".pdf":
         text = _pdf_text(data)
     elif suffix == ".docx":
         text = _docx_text(data)
     else:
         raise serializers.ValidationError(
-            {"file": "Upload a .txt, .md, .pdf, or .docx file."}
+            {"file": "Upload a .txt, .md, .html, .csv, .json, .pdf, .docx, or an image."}
         )
-    mime = getattr(upload, "content_type", "") or "application/octet-stream"
-    return text, name, mime
+    content_type = getattr(upload, "content_type", "") or "application/octet-stream"
+    return data, name, content_type, text
 
 
 def fetch_url_text(url: str) -> str:

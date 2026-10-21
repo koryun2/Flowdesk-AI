@@ -17,7 +17,7 @@ function welcomeMessage(): AgentMessage {
     id: 'welcome',
     role: 'assistant',
     content:
-      'I can search operational data, answer from your knowledge base, and prepare validated actions. What would you like to do?',
+      'I can help with this Flowdesk workspace only. Ask me about tickets, customers, or the knowledge base. I can also prepare a ticket change for your approval.',
     createdAt: new Date().toISOString(),
   }
 }
@@ -146,7 +146,7 @@ export function AgentPage() {
     <Page>
       <PageHeader
         title="AI Agent"
-        description="Investigate operations and prepare safe, validated actions in natural language."
+        description="Ask about tickets, customers, and the knowledge base. Questions outside this workspace get a short explanation of what the agent can do."
         actions={
           <Button icon={Plus} onClick={startNew} variant="secondary">
             New conversation

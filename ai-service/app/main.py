@@ -5,7 +5,7 @@ from uuid import uuid4
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from .agent import plan_message
+from .agent import phrase_reply, plan_message
 from .classifier import build_analysis
 from .config import get_settings
 from .knowledge import EMBEDDING_DIMENSIONS, answer_question, embed_texts
@@ -134,6 +134,29 @@ def plan_agent_turn(payload: AgentPlanRequest) -> AgentPlanResponse:
         payload.model.strip(),
     )
     return AgentPlanResponse(**plan)
+
+
+class AgentReplyRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=2000)
+    results: list[str] = Field(min_length=1, max_length=4)
+    model: str = Field(default="", max_length=80)
+
+
+class AgentReplyResponse(BaseModel):
+    reply: str
+    model_name: str
+
+
+@app.post("/v1/agent/reply", tags=["agent"], response_model=AgentReplyResponse)
+def phrase_agent_reply(payload: AgentReplyRequest) -> AgentReplyResponse:
+    current = get_settings()
+    if payload.model.strip() in {"gemma-4-26b-a4b-it", "gemini-3.6-flash"}:
+        current = current.model_copy(update={"gemini_model": payload.model.strip()})
+    try:
+        reply = phrase_reply(payload.message.strip(), payload.results, current, payload.model.strip())
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return AgentReplyResponse(reply=reply, model_name=current.gemini_model)
 
 
 @app.post("/v1/knowledge/answers", tags=["knowledge"], response_model=AnswerResponse)

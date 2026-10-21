@@ -249,3 +249,40 @@ class Comment(TimeStampedUUIDModel):
 
     def __str__(self) -> str:
         return f"Comment on {self.ticket}"
+
+
+def ticket_upload_path(instance, filename: str) -> str:
+    return f"tickets/{instance.organization_id}/{instance.ticket_id}/{instance.id}/{filename}"
+
+
+class TicketAttachment(TimeStampedUUIDModel):
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        related_name="ticket_attachments",
+    )
+    ticket = models.ForeignKey(
+        Ticket,
+        on_delete=models.CASCADE,
+        related_name="attachments",
+    )
+    uploaded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="ticket_attachments",
+    )
+    stored_file = models.FileField(upload_to=ticket_upload_path, blank=True, max_length=255)
+    file_name = models.CharField(max_length=255)
+    mime_type = models.CharField(max_length=120)
+    size = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ["created_at"]
+        indexes = [
+            models.Index(fields=["ticket", "created_at"], name="attachment_ticket_created_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return self.file_name

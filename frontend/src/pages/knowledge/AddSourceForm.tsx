@@ -5,6 +5,7 @@ import { FormError, FormField, InputWithIcon } from '../../components/fields'
 import { Button, Modal } from '../../components/ui'
 import { useToast } from '../../providers/toast'
 import { ApiError } from '../../services/authApi'
+import { isImageDocument } from '../../lib/files'
 import { workspaceApi } from '../../services/workspaceApi'
 import type { KnowledgeDocument } from '../../types'
 import {
@@ -57,7 +58,7 @@ export function AddSourceForm({ open, onClose }: AddSourceFormProps) {
         notify('Source queued in Redis')
         return
       }
-      notify('Source indexed')
+      notify(isImageDocument(document) ? 'Image added' : 'Source indexed')
     },
     onError: (error) => {
       if (error instanceof ApiError) {
@@ -70,7 +71,7 @@ export function AddSourceForm({ open, onClose }: AddSourceFormProps) {
 
   return (
     <Modal
-      description="Flowdesk will split, embed, and index this content for retrieval."
+      description="Add a document or an image. Documents are indexed for answers. Images are stored with the source."
       footer={
         <>
           <Button onClick={onClose} variant="secondary">
@@ -121,9 +122,9 @@ export function AddSourceForm({ open, onClose }: AddSourceFormProps) {
         <FileDropzone>
           <FileUp size={25} />
           <strong>{file?.name || 'Drop a file here or browse'}</strong>
-          <span>PDF, DOCX, TXT, or Markdown up to 8 MB</span>
+          <span>PDF, DOCX, TXT, Markdown, HTML, CSV, JSON, or an image up to 8 MB</span>
           <input
-            accept=".pdf,.docx,.txt,.md"
+            accept=".pdf,.docx,.txt,.md,.markdown,.html,.htm,.csv,.json,.png,.jpg,.jpeg,.webp,.gif"
             onChange={(event) => {
               const next = event.target.files?.[0] ?? null
               setFile(next)

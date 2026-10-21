@@ -56,6 +56,14 @@ export interface AIAnalysis {
   createdAt: string
 }
 
+export interface TicketAttachment {
+  id: string
+  fileName: string
+  mimeType: string
+  size: number
+  createdAt: string
+}
+
 export interface Ticket {
   id: string
   key: string
@@ -69,6 +77,7 @@ export interface Ticket {
   assignee: User | null
   tags: Tag[]
   comments: Comment[]
+  attachments: TicketAttachment[]
   activity: Activity[]
   analysis?: AIAnalysis
   analysisError?: string
@@ -100,6 +109,8 @@ export interface KnowledgeDocument {
   sourceType: 'text' | 'file' | 'url'
   status: 'draft' | 'processing' | 'ready' | 'failed' | 'archived'
   fileName?: string
+  mimeType?: string
+  hasFile?: boolean
   sourceUrl?: string
   size: string
   chunks: number

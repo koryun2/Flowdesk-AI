@@ -169,6 +169,7 @@ export const mockApi = {
         data.users.find((user) => user.id === draft.assigneeId) ?? null,
       tags: [],
       comments: [],
+      attachments: [],
       activity: [
         {
           id: makeId('activity'),

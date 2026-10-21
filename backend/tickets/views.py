@@ -1,12 +1,13 @@
 from datetime import datetime, timedelta
 from uuid import UUID
 
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db.models import Count, Q
 from django.db.models.functions import TruncDate
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.response import Response
 
 from accounts.permissions import OrganizationRolePermission
@@ -14,14 +15,19 @@ from core.jobs import enqueue
 from audit.models import ActivityLog
 from audit.services import record_activity
 from core.api import ordered
+from core.files import image_mime, open_stored, read_limited, safe_name, store_bytes
+from organizations.models import Membership
 
-from .models import Comment, Tag, Ticket
+from .models import Comment, Tag, Ticket, TicketAttachment
 from .serializers import (
     CommentSerializer,
     TagSerializer,
+    TicketAttachmentSerializer,
     TicketDetailSerializer,
     TicketSerializer,
 )
+
+MAX_ATTACHMENTS = 8
 
 OPEN_STATUSES = (
     Ticket.Status.NEW,
@@ -70,6 +76,11 @@ class TicketViewSet(viewsets.ModelViewSet):
     permission_classes = [OrganizationRolePermission]
     http_method_names = ["get", "post", "patch", "delete", "head", "options"]
 
+    def get_permissions(self):
+        if getattr(self, "action", None) == "attachment":
+            self.delete_role = Membership.Role.AGENT
+        return [permission() for permission in self.permission_classes]
+
     def get_serializer_class(self):
         if self.action == "retrieve":
             return TicketDetailSerializer
@@ -80,7 +91,7 @@ class TicketViewSet(viewsets.ModelViewSet):
         queryset = (
             Ticket.objects.filter(organization=organization)
             .select_related("customer", "assignee", "created_by")
-            .prefetch_related("tags", "comments__author", "ai_analyses")
+            .prefetch_related("tags", "comments__author", "ai_analyses", "attachments")
             .annotate(
                 comment_count=Count("comments", distinct=True),
                 priority_rank=priority_rank_expression(),
@@ -266,6 +277,63 @@ class TicketViewSet(viewsets.ModelViewSet):
             TicketDetailSerializer(ticket, context=self.get_serializer_context()).data,
             status=status.HTTP_201_CREATED,
         )
+
+    @action(detail=True, methods=["post"])
+    def attachments(self, request, pk=None):
+        ticket = self.get_object()
+        upload = request.FILES.get("file")
+        if upload is None:
+            raise ValidationError({"file": "Choose an image."})
+        if ticket.attachments.count() >= MAX_ATTACHMENTS:
+            raise ValidationError({"file": "A ticket can hold 8 screenshots."})
+        raw = read_limited(upload)
+        file_name = safe_name(getattr(upload, "name", "") or "screenshot.png")
+        mime_type = image_mime(file_name)
+        if not mime_type:
+            raise ValidationError({"file": "Upload a PNG, JPG, WEBP, or GIF."})
+        attachment = TicketAttachment(
+            organization=ticket.organization,
+            ticket=ticket,
+            uploaded_by=request.user,
+            file_name=file_name,
+            mime_type=mime_type,
+            size=len(raw),
+        )
+        store_bytes(attachment, "stored_file", raw, file_name)
+        record_activity(
+            organization=ticket.organization,
+            actor=request.user,
+            action="added attachment",
+            entity_type=ActivityLog.EntityType.TICKET,
+            entity_id=ticket.id,
+            context={"detail": file_name},
+        )
+        return Response(TicketAttachmentSerializer(attachment).data, status=status.HTTP_201_CREATED)
+
+    @action(
+        detail=True,
+        methods=["get", "delete"],
+        url_path=r"attachments/(?P<attachment_id>[0-9a-f-]{36})",
+    )
+    def attachment(self, request, pk=None, attachment_id=None):
+        ticket = self.get_object()
+        try:
+            attachment = ticket.attachments.get(pk=attachment_id)
+        except (TicketAttachment.DoesNotExist, ValueError, DjangoValidationError) as exc:
+            raise NotFound() from exc
+        if request.method == "DELETE":
+            file_name = attachment.file_name
+            attachment.delete()
+            record_activity(
+                organization=ticket.organization,
+                actor=request.user,
+                action="removed attachment",
+                entity_type=ActivityLog.EntityType.TICKET,
+                entity_id=ticket.id,
+                context={"detail": file_name},
+            )
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        return open_stored(attachment.stored_file, attachment.file_name, attachment.mime_type)
 
 
 def _daily_counts(queryset, field: str) -> dict:

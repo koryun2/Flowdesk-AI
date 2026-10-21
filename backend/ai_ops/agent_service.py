@@ -18,7 +18,7 @@ from tickets.models import Ticket
 from tickets.serializers import CommentSerializer, TicketSerializer
 from tickets.views import OPEN_STATUSES, ticket_search
 
-from .agent_client import AgentAIError, request_plan
+from .agent_client import AgentAIError, request_plan, request_reply
 from .models import AgentAction, AgentConversation, AgentMessage
 
 
@@ -53,7 +53,7 @@ def run_turn(user, membership, message: str, prior: str = "", conversation_id=No
             tool_calls.append(_read_tool(name, arguments, membership))
         elif name in WRITE_TOOLS:
             tool_calls.append(_prepare_write(name, arguments, user, membership))
-    reply = _reply(plan.get("reply") or "", tool_calls)
+    reply = _spoken_reply(message, plan.get("reply") or "", tool_calls, model)
     with transaction.atomic():
         conversation = _conversation(user, membership, message, conversation_id)
         AgentMessage.objects.create(
@@ -490,7 +490,13 @@ def _planner_context(user, membership, conversation_id) -> str:
     messages = list(conversation.messages.order_by("-created_at")[:8])
     lines = []
     for message in reversed(messages):
-        text = re.sub(r"\s+", " ", message.content).strip()[:400]
+        parts = [re.sub(r"\s+", " ", message.content).strip()]
+        if message.role != AgentMessage.Role.USER:
+            for call in message.tool_calls or []:
+                result = re.sub(r"\s+", " ", str(call.get("result") or "")).strip()
+                if result and result not in parts[0]:
+                    parts.append(result)
+        text = " ".join(part for part in parts if part)[:400]
         if not text:
             continue
         role = "User" if message.role == AgentMessage.Role.USER else "Assistant"
@@ -539,6 +545,35 @@ def _remember_tool(user, membership, payload: dict) -> None:
             message.tool_calls = calls
             message.save(update_fields=["tool_calls", "updated_at"])
             return
+
+
+def _spoken_reply(message: str, fallback: str, tool_calls: list[dict], model: str) -> str:
+    factual = _reply(fallback, tool_calls)
+    results = [str(call.get("result") or "") for call in tool_calls if call.get("result")]
+    if not results:
+        return factual
+    try:
+        spoken = request_reply(message, results, model)
+    except AgentAIError:
+        return factual
+    return _accept_spoken_reply(spoken, factual, results)
+
+
+def _accept_spoken_reply(spoken: str, factual: str, results: list[str]) -> str:
+    spoken = spoken.strip()
+    if not spoken or len(spoken) > 4000:
+        return factual
+    combined = "\n".join(results)
+    links = re.findall(r"\[FD-\d+\]\(/tickets/[0-9a-fA-F-]+\)", combined)
+    invented = {key.upper() for key in re.findall(r"FD-\d+", spoken, re.I)} - {
+        key.upper() for key in re.findall(r"FD-\d+", combined, re.I)
+    }
+    if invented:
+        return factual
+    missing = [link for link in links if link not in spoken]
+    if missing:
+        spoken = f"{spoken.rstrip()}\n\n{' '.join(missing)}"
+    return spoken
 
 
 def _reply(fallback: str, tool_calls: list[dict]) -> str:

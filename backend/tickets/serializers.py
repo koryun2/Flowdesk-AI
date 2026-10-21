@@ -9,7 +9,7 @@ from audit.models import ActivityLog
 from customers.models import Customer
 from organizations.models import Membership, Organization
 
-from .models import Comment, Tag, Ticket, TicketTag
+from .models import Comment, Tag, Ticket, TicketAttachment, TicketTag
 
 
 class UserSummarySerializer(serializers.ModelSerializer):
@@ -200,13 +200,21 @@ class TicketSerializer(serializers.ModelSerializer):
         return instance
 
 
+class TicketAttachmentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TicketAttachment
+        fields = ["id", "file_name", "mime_type", "size", "created_at"]
+        read_only_fields = ["id", "file_name", "mime_type", "size", "created_at"]
+
+
 class TicketDetailSerializer(TicketSerializer):
     comments = CommentSerializer(many=True, read_only=True)
+    attachments = TicketAttachmentSerializer(many=True, read_only=True)
     activity = serializers.SerializerMethodField()
     analysis = serializers.SerializerMethodField()
 
     class Meta(TicketSerializer.Meta):
-        fields = TicketSerializer.Meta.fields + ["comments", "activity", "analysis"]
+        fields = TicketSerializer.Meta.fields + ["comments", "attachments", "activity", "analysis"]
 
     def get_activity(self, ticket: Ticket):
         logs = (

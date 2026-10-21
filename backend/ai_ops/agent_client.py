@@ -38,3 +38,30 @@ def request_plan(message: str, prior: str = "", model: str = "") -> dict:
     if not isinstance(body, dict) or not isinstance(body.get("tool_calls"), list):
         raise AgentAIError("AI service returned an unexpected plan.")
     return body
+
+
+def request_reply(message: str, results: list[str], model: str = "") -> str:
+    url = f"{settings.AI_SERVICE_URL.rstrip('/')}/v1/agent/reply"
+    body = {"message": message, "results": [str(result)[:2000] for result in results[:4]]}
+    if model:
+        body["model"] = model
+    http_request = request.Request(
+        url,
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        method="POST",
+    )
+    timeout = float(getattr(settings, "AI_SERVICE_TIMEOUT", 20))
+    try:
+        with request.urlopen(http_request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode())
+    except error.HTTPError as exc:
+        detail = exc.read().decode(errors="replace")[:300]
+        raise AgentAIError(f"AI service returned {exc.code}: {detail}") from exc
+    except (error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        logger.warning("Agent reply request failed: %s", exc)
+        raise AgentAIError("AI service is unavailable.") from exc
+    reply = payload.get("reply") if isinstance(payload, dict) else None
+    if not isinstance(reply, str) or not reply.strip():
+        raise AgentAIError("AI service returned an unexpected reply.")
+    return reply.strip()

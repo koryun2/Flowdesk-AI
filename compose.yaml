@@ -35,10 +35,12 @@ services:
       DB_PORT: 5432
       AI_SERVICE_URL: http://ai-service:8001
       REDIS_URL: redis://redis:6379/0
+      MEDIA_ROOT: /app/media
     ports:
       - "8000:8000"
     volumes:
       - ./backend:/app
+      - media_data:/app/media
     depends_on:
       db:
         condition: service_healthy
@@ -62,8 +64,10 @@ services:
       DB_PORT: 5432
       AI_SERVICE_URL: http://ai-service:8001
       REDIS_URL: redis://redis:6379/0
+      MEDIA_ROOT: /app/media
     volumes:
       - ./backend:/app
+      - media_data:/app/media
     depends_on:
       db:
         condition: service_healthy
@@ -118,3 +122,4 @@ volumes:
   frontend_node_modules:
   postgres_data:
   redis_data:
+  media_data:

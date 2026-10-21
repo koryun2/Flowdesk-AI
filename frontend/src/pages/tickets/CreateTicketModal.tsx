@@ -1,6 +1,7 @@
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useState } from 'react'
+import { ImagePlus, X } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { useNavigate } from 'react-router-dom'
 import styled from 'styled-components'
@@ -31,6 +32,81 @@ const FullFormError = styled(FormError)`
   }
 `
 
+const ShotAdd = styled.label`
+  display: grid;
+  width: 148px;
+  height: 96px;
+  place-items: center;
+  border: 1px dashed #cbd0dc;
+  border-radius: 8px;
+  color: ${({ theme }) => theme.primary};
+  background: #fafbff;
+  cursor: pointer;
+
+  input {
+    display: none;
+  }
+
+  &:hover {
+    border-color: ${({ theme }) => theme.primary};
+    background: ${({ theme }) => theme.primarySoft};
+  }
+`
+
+const ShotRow = styled.div`
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+`
+
+const ShotTile = styled.div`
+  position: relative;
+  width: 148px;
+  height: 96px;
+  overflow: hidden;
+  border: 1px solid ${({ theme }) => theme.border};
+  border-radius: 8px;
+
+  img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: 8px;
+    background: ${({ theme }) => theme.primarySoft};
+  }
+`
+
+const ShotRemove = styled.button`
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border: 0;
+  border-radius: 999px;
+  color: #fff;
+  background: rgb(15 23 42 / 72%);
+
+  &:hover {
+    background: ${({ theme }) => theme.red};
+  }
+`
+
+const MAX_SCREENSHOTS = 8
+const MAX_SCREENSHOT_BYTES = 8 * 1024 * 1024
+
+function isScreenshot(file: File) {
+  return (
+    file.type === 'image/png' ||
+    file.type === 'image/jpeg' ||
+    file.type === 'image/webp' ||
+    file.type === 'image/gif' ||
+    /\.(png|jpe?g|webp|gif)$/i.test(file.name)
+  )
+}
+
 export function CreateTicketModal({
   open,
   onClose,
@@ -42,6 +118,17 @@ export function CreateTicketModal({
   const queryClient = useQueryClient()
   const { notify } = useToast()
   const [formError, setFormError] = useState('')
+  const [files, setFiles] = useState<File[]>([])
+  const previews = useMemo(
+    () => files.map((file) => ({ file, url: URL.createObjectURL(file) })),
+    [files],
+  )
+  useEffect(
+    () => () => {
+      for (const preview of previews) URL.revokeObjectURL(preview.url)
+    },
+    [previews],
+  )
   const {
     register,
     handleSubmit,
@@ -72,15 +159,36 @@ export function CreateTicketModal({
   const customers = customerPage?.results ?? []
 
   const mutation = useMutation({
-    mutationFn: workspaceApi.createTicket,
-    onSuccess: (ticket) => {
+    mutationFn: async (input: { values: FormValues; files: File[] }) => {
+      const ticket = await workspaceApi.createTicket({
+        ...input.values,
+        priority: input.values.priority as TicketPriority,
+      })
+      let uploadError = ''
+      for (const file of input.files) {
+        try {
+          await workspaceApi.addTicketAttachment(ticket.id, file)
+        } catch (error) {
+          uploadError =
+            error instanceof ApiError
+              ? Object.values(error.fieldErrors)[0] || error.message
+              : 'The screenshot was not added'
+          break
+        }
+      }
+      return { ticket, uploadError }
+    },
+    onSuccess: ({ ticket, uploadError }) => {
       queryClient.invalidateQueries({ queryKey: ['tickets'] })
       queryClient.invalidateQueries({ queryKey: ['ticket-summary'] })
       queryClient.invalidateQueries({ queryKey: ['customers'] })
       queryClient.invalidateQueries({ queryKey: ['dashboard'] })
       queryClient.invalidateQueries({ queryKey: ['notifications'] })
+      queryClient.invalidateQueries({ queryKey: ['ticket', ticket.id] })
       notify(`${ticket.key} created successfully`)
+      if (uploadError) notify(uploadError, 'error')
       reset()
+      setFiles([])
       onClose()
       navigate(`/tickets/${ticket.id}`)
     },
@@ -103,9 +211,28 @@ export function CreateTicketModal({
     },
   })
 
+  const addScreenshots = (list: FileList | null) => {
+    const picked = Array.from(list ?? [])
+    if (!picked.length) return
+    const images = picked.filter(isScreenshot)
+    if (images.length !== picked.length) {
+      setFormError('Upload a PNG, JPG, WEBP, or GIF.')
+    } else if (images.some((file) => file.size > MAX_SCREENSHOT_BYTES)) {
+      setFormError('Files must be 8 MB or smaller.')
+    } else if (files.length + images.length > MAX_SCREENSHOTS) {
+      setFormError('A ticket can hold 8 screenshots.')
+    } else {
+      setFormError('')
+    }
+    const accepted = images.filter((file) => file.size <= MAX_SCREENSHOT_BYTES)
+    setFiles((current) => [...current, ...accepted].slice(0, MAX_SCREENSHOTS))
+  }
+
   const close = () => {
     if (!mutation.isPending) {
       reset()
+      setFiles([])
+      setFormError('')
       onClose()
     }
   }
@@ -135,10 +262,7 @@ export function CreateTicketModal({
         id="create-ticket-form"
         onSubmit={handleSubmit((values) => {
           setFormError('')
-          mutation.mutate({
-            ...values,
-            priority: values.priority as TicketPriority,
-          })
+          mutation.mutate({ values, files })
         })}
       >
         <FormGrid>
@@ -164,6 +288,37 @@ export function CreateTicketModal({
               {...register('description')}
             />
             {errors.description ? <span>{errors.description.message}</span> : null}
+            <ShotRow>
+              {previews.map((preview, index) => (
+                <ShotTile key={preview.url}>
+                  <img alt={preview.file.name} src={preview.url} />
+                  <ShotRemove
+                    aria-label={`Remove ${preview.file.name}`}
+                    disabled={mutation.isPending}
+                    onClick={() =>
+                      setFiles((current) => current.filter((_, item) => item !== index))
+                    }
+                    type="button"
+                  >
+                    <X size={12} />
+                  </ShotRemove>
+                </ShotTile>
+              ))}
+              <ShotAdd>
+                <ImagePlus size={18} />
+                <input
+                  accept="image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif"
+                  aria-label="Add screenshot"
+                  disabled={mutation.isPending}
+                  multiple
+                  onChange={(event) => {
+                    addScreenshots(event.target.files)
+                    event.target.value = ''
+                  }}
+                  type="file"
+                />
+              </ShotAdd>
+            </ShotRow>
           </FormField>
           <FormField>
             <label htmlFor="ticket-customer">Customer</label>

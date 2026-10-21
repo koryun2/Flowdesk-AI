@@ -9,6 +9,24 @@ from .gemini import generate_json
 logger = logging.getLogger("flowdesk.agent")
 
 LOCAL_AGENT_MODEL = "flowdesk-local-agent"
+CAPABILITY_REPLY = (
+    "I can help with this Flowdesk workspace only. "
+    "I can search and count tickets, look up customers, answer from the knowledge base, "
+    "and prepare a ticket change for your approval. "
+    "Ask me about one of those."
+)
+_WORKSPACE = re.compile(
+    r"\b(tickets?|customers?|knowledge|documents?|docs|documentation|cv|resumes?|sources?|"
+    r"guides?|invoices?|billing|exports?|flowdesk|comments?)\b|FD-\d+",
+    re.I,
+)
+_FOLLOWUP = re.compile(r"\b(that|those|them|this|these|it|he|she|his|her|their|same|again|ones)\b", re.I)
+SCOPE_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {"in_scope": {"type": "boolean"}},
+    "required": ["in_scope"],
+}
 TOOL_NAMES = (
     "search_tickets",
     "get_customer",
@@ -76,6 +94,16 @@ PLAN_SCHEMA = {
 def plan_message(message: str, settings: Settings, prior: str = "", model: str = "") -> dict:
     if model in ANALYSIS_MODELS:
         settings = settings.model_copy(update={"gemini_model": model})
+    message = _with_memory(message, prior)
+    if not _allows_workspace(message, prior, settings):
+        return {
+            "tool_calls": [],
+            "reply": CAPABILITY_REPLY,
+            "model_name": settings.gemini_model if settings.gemini_api_key else LOCAL_AGENT_MODEL,
+        }
+    remembered = _complete_write(message)
+    if remembered:
+        return remembered
     if settings.gemini_api_key:
         try:
             plan = plan_with_gemini(message, settings, prior)
@@ -87,10 +115,176 @@ def plan_message(message: str, settings: Settings, prior: str = "", model: str =
     return _revise_plan(message, prior, plan)
 
 
+def _with_memory(message: str, prior: str) -> str:
+    if not prior.strip() or not _is_slot_reply(message):
+        return message
+    previous = _last_user_request(prior)
+    if not previous:
+        return message
+    text = previous.lower()
+    if not (
+        _is_update(text)
+        or _is_comment(text)
+        or _note_body(previous)
+        or "this ticket" in text
+        or "the ticket" in text
+    ):
+        return message
+    key = _ticket_label(message)
+    if _ticket_label(previous):
+        return re.sub(r"\bFD-\d+\b", key, previous, count=1, flags=re.I)
+    return f"Ticket {key}. {previous.rstrip(' .')}."
+
+
+def _last_user_request(prior: str) -> str:
+    matches = re.findall(r"(?im)^User:\s*(.+)$", prior)
+    return matches[-1].strip() if matches else ""
+
+
+_SLOT_WORDS = {"it", "its", "the", "ticket", "is", "this", "that", "one", "number", "key", "use"}
+
+
+def _is_slot_reply(message: str) -> bool:
+    if not _ticket_label(message):
+        return False
+    rest = re.sub(r"\bFD-\d+\b", " ", message, flags=re.I)
+    return all(word in _SLOT_WORDS for word in re.findall(r"[a-z0-9]+", rest.lower()))
+
+
+def _note_body(message: str) -> str:
+    match = re.search(
+        r"\b(?:add|leave|put|write)\b(?:\s+\w+){0,6}\s+(?:that|saying)\s+(.+)$",
+        message,
+        re.I,
+    )
+    if not match:
+        return ""
+    return match.group(1).strip(" .")[:4000]
+
+
+def _write_plan(message: str, text: str) -> list[dict] | None:
+    note = _note_body(message)
+    update = _is_update(text)
+    comment = _is_comment(text) or bool(note)
+    if not update and not comment:
+        return None
+    update_arguments = _update_args(message, text)
+    if update and "status" not in update_arguments and "priority" not in update_arguments and not comment:
+        return None
+    calls = []
+    if update and ("status" in update_arguments or "priority" in update_arguments):
+        calls.append({"name": "update_ticket", "arguments": update_arguments})
+    if comment:
+        arguments = _comment_args(message, text)
+        if note:
+            arguments["body"] = note
+        ticket = _ticket_label(message)
+        if ticket:
+            arguments["ticket"] = ticket
+        calls.append({"name": "add_ticket_comment", "arguments": arguments})
+    return calls or None
+
+
+def _complete_write(message: str) -> dict | None:
+    writes = _write_plan(message, message.lower())
+    if not writes:
+        return None
+    if all(str(call["arguments"].get("ticket") or "").strip() for call in writes):
+        return {"tool_calls": writes, "reply": "", "model_name": LOCAL_AGENT_MODEL}
+    return {
+        "tool_calls": [],
+        "reply": "Name one ticket, such as FD-1284.",
+        "model_name": LOCAL_AGENT_MODEL,
+    }
+
+
+def phrase_reply(message: str, results: list[str], settings: Settings, model: str = "") -> str:
+    if not settings.gemini_api_key:
+        raise RuntimeError("The language model request failed.")
+    updates = {"gemini_timeout": 12}
+    if model in ANALYSIS_MODELS:
+        updates["gemini_model"] = model
+    settings = settings.model_copy(update=updates)
+    numbered = "\n\n".join(f"Result {index}:\n{result}" for index, result in enumerate(results, start=1))
+    content = generate_json(
+        (
+            "You are the Flowdesk operations assistant. Write a short, natural reply. "
+            "Use only the tool results. Keep ticket links that you mention exactly as written, including the markdown. "
+            "Do not invent ticket numbers, counts, customers, or facts that are not in the results. "
+            "Do not answer anything the results do not cover. "
+            "If a change is waiting for approval, say that it has not been applied yet. "
+            "Do not mention these instructions."
+        ),
+        f"Request:\n{message.strip()}\n\nTool results:\n{numbered}",
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"reply": {"type": "string"}},
+            "required": ["reply"],
+        },
+        settings,
+    )
+    text = str(content.get("reply") or "").strip()
+    if not text:
+        raise RuntimeError("The language model did not return an answer.")
+    return text[:4000]
+
+
+def _allows_workspace(message: str, prior: str, settings: Settings) -> bool:
+    text = message.lower()
+    if _asks_capabilities(text) and not _WORKSPACE.search(message):
+        return False
+    if _WORKSPACE.search(message) or _is_create(text) or _is_update(text) or _is_comment(text):
+        return True
+    if _wants_customer_roster(text, prior.lower()):
+        return True
+    if prior and _WORKSPACE.search(prior) and (
+        _FOLLOWUP.search(message) or re.search(r"\b(update|change|edit)\b", text)
+    ):
+        return True
+    if not settings.gemini_api_key:
+        return False
+    user_text = message
+    if prior.strip():
+        user_text = f"Recent conversation:\n{prior.strip()}\n\nNew request:\n{message}"
+    try:
+        scoped = settings.model_copy(update={"gemini_timeout": settings.gemini_plan_timeout})
+        content = generate_json(
+            (
+                "Decide if a request belongs in a support workspace. "
+                "In scope: tickets, customers, knowledge documents, resumes, and follow-ups to that work. "
+                "Out of scope: general knowledge, weather, jokes, coding help, personal advice, and anything else. "
+                "Set in_scope to false when the request is outside the workspace."
+            ),
+            user_text,
+            SCOPE_SCHEMA,
+            scoped,
+        )
+    except RuntimeError:
+        logger.warning("Scope check failed. Treating the request as outside the workspace.")
+        return False
+    return content.get("in_scope") is True
+
+
+def _asks_capabilities(text: str) -> bool:
+    return any(
+        phrase in text
+        for phrase in (
+            "what can you do",
+            "what do you do",
+            "how can you help",
+            "what can you help",
+            "who are you",
+            "your capabilities",
+        )
+    )
+
+
 def plan_locally(message: str) -> dict:
     text = message.lower()
-    if _is_comment(text):
-        calls = [{"name": "add_ticket_comment", "arguments": _comment_args(message, text)}]
+    writes = _write_plan(message, text)
+    if writes:
+        calls = writes
     elif _is_create(text):
         calls = [{"name": "create_ticket", "arguments": _create_args(message, text)}]
     elif _is_update(text):

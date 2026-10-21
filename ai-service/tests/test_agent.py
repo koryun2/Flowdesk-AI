@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import patch
 from urllib.error import URLError
 
-from app.agent import plan_locally, plan_message
+from app.agent import CAPABILITY_REPLY, phrase_reply, plan_locally, plan_message
 from app.config import Settings
 
 
@@ -222,3 +222,70 @@ class LocalAgentPlannerTests(unittest.TestCase):
         self.assertIn("FD-1284", user_text)
         self.assertIn("update the second one", user_text)
         self.assertEqual(plan["model_name"], "gemini-3.6-flash")
+
+    def test_unrelated_question_explains_the_workspace_limits(self):
+        offline = plan_message(
+            "What is the weather in Paris?",
+            Settings(_env_file=None, gemini_api_key=None),
+        )
+        with patch("app.agent.generate_json", return_value={"in_scope": False}) as generate:
+            checked = plan_message(
+                "Write a poem about the ocean",
+                Settings(_env_file=None, gemini_api_key="test-key"),
+            )
+
+        self.assertEqual(offline["tool_calls"], [])
+        self.assertEqual(offline["reply"], CAPABILITY_REPLY)
+        self.assertEqual(checked["tool_calls"], [])
+        self.assertEqual(checked["reply"], CAPABILITY_REPLY)
+        self.assertEqual(generate.call_count, 1)
+
+    def test_capability_question_does_not_call_the_model(self):
+        with patch("app.agent.generate_json") as generate:
+            plan = plan_message(
+                "What can you do?",
+                Settings(_env_file=None, gemini_api_key="test-key"),
+            )
+
+        self.assertEqual(plan["tool_calls"], [])
+        self.assertIn("knowledge base", plan["reply"])
+        generate.assert_not_called()
+
+    def test_reply_is_written_from_the_tool_results(self):
+        with patch("app.agent.generate_json", return_value={"reply": "There is 1 open ticket."}) as generate:
+            reply = phrase_reply(
+                "how many open tickets we have?",
+                ["There is 1 open ticket: [FD-1](/tickets/abc)."],
+                Settings(_env_file=None, gemini_api_key="test-key", gemini_model="gemma-4-26b-a4b-it"),
+                "gemini-3.6-flash",
+            )
+
+        self.assertEqual(reply, "There is 1 open ticket.")
+        self.assertIn("There is 1 open ticket", generate.call_args.args[1])
+        self.assertEqual(generate.call_args.args[3].gemini_model, "gemini-3.6-flash")
+
+    def test_a_ticket_key_continues_the_unfinished_request(self):
+        settings = Settings(_env_file=None, gemini_api_key="test-key")
+        first = plan_message("reopen this ticket and add that it needs rereview", settings)
+        with patch("app.agent.generate_json") as generate:
+            follow = plan_message(
+                "FD-1244",
+                settings,
+                "User: reopen this ticket and add that it needs rereview\n"
+                "Assistant: Name one ticket, such as FD-1284.",
+            )
+
+        self.assertEqual(first["tool_calls"], [])
+        self.assertIn("FD-1284", first["reply"])
+        generate.assert_not_called()
+        self.assertEqual(
+            follow["tool_calls"][0],
+            {
+                "name": "update_ticket",
+                "arguments": {"ticket": "FD-1244", "status": "investigating"},
+            },
+        )
+        note = follow["tool_calls"][1]
+        self.assertEqual(note["name"], "add_ticket_comment")
+        self.assertEqual(note["arguments"]["ticket"], "FD-1244")
+        self.assertIn("rereview", note["arguments"]["body"])

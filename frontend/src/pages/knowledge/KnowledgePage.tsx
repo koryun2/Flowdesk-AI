@@ -3,10 +3,12 @@ import { BookOpenCheck, CheckCircle2, Inbox, Plus, Sparkles } from 'lucide-react
 import { useState } from 'react'
 import type { FormEvent } from 'react'
 import { Button, Page, PageHeader } from '../../components/ui'
+import type { KnowledgeDocument } from '../../types'
 import { useAuth } from '../../providers/auth-context'
 import { useToast } from '../../providers/toast'
 import { workspaceApi } from '../../services/workspaceApi'
 import { AddSourceForm } from './AddSourceForm'
+import { EditSourceForm } from './EditSourceForm'
 import { KnowledgeAsk } from './KnowledgeAsk'
 import { KnowledgeLibrary } from './KnowledgeLibrary'
 import { KnowledgeStats, QueueCard, StatCard } from './KnowledgePage.styles'
@@ -17,8 +19,10 @@ export function KnowledgePage() {
   const canEdit = user?.memberships[0]?.role !== 'viewer'
   const [search, setSearch] = useState('')
   const [addOpen, setAddOpen] = useState(false)
+  const [editing, setEditing] = useState<KnowledgeDocument | null>(null)
   const [question, setQuestion] = useState('')
   const [submittedQuestion, setSubmittedQuestion] = useState('')
+  const [selectedIds, setSelectedIds] = useState<string[]>([])
   const {
     data: documents = [],
     isLoading,
@@ -41,15 +45,30 @@ export function KnowledgePage() {
     refetchInterval: (query) => ((query.state.data?.queued ?? 0) > 0 ? 2000 : 5000),
   })
   const latestJob = jobs.data?.jobs[0]
+  const catalog = useQuery({
+    queryKey: ['documents', ''],
+    queryFn: () => workspaceApi.listDocuments(),
+    refetchInterval: (query) =>
+      query.state.data?.some((document) => document.status === 'processing') ? 2000 : false,
+  })
   const answerMutation = useMutation({
-    mutationFn: workspaceApi.askKnowledge,
+    mutationFn: ({ question: next, documentIds }: { question: string; documentIds: string[] }) =>
+      workspaceApi.askKnowledge(next, documentIds),
     onSuccess: () => setSubmittedQuestion(question),
     onError: () => notify('Unable to search the knowledge base', 'error'),
   })
 
   const askSubmit = (event: FormEvent) => {
     event.preventDefault()
-    if (question.trim()) answerMutation.mutate(question.trim())
+    if (question.trim()) {
+      answerMutation.mutate({ question: question.trim(), documentIds: selectedIds })
+    }
+  }
+
+  const toggleSource = (id: string) => {
+    setSelectedIds((current) =>
+      current.includes(id) ? current.filter((item) => item !== id) : [...current, id],
+    )
   }
 
   return (
@@ -110,11 +129,14 @@ export function KnowledgePage() {
 
       <KnowledgeAsk
         answer={answerMutation.data}
+        documents={catalog.data ?? documents}
         isPending={answerMutation.isPending}
         onCitationClick={setSearch}
         onQuestionChange={setQuestion}
         onSubmit={askSubmit}
+        onToggleSource={toggleSource}
         question={question}
+        selectedIds={selectedIds}
         submittedQuestion={submittedQuestion}
       />
 
@@ -124,12 +146,18 @@ export function KnowledgePage() {
         isError={isError}
         isLoading={isLoading}
         onAddSource={() => setAddOpen(true)}
+        onOpenSource={setEditing}
         onRetry={() => refetch()}
         onSearchChange={setSearch}
         search={search}
       />
 
       <AddSourceForm onClose={() => setAddOpen(false)} open={addOpen} />
+      <EditSourceForm
+        canEdit={canEdit}
+        document={editing}
+        onClose={() => setEditing(null)}
+      />
     </Page>
   )
 }

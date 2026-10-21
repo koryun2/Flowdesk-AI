@@ -6,6 +6,7 @@ import {
   Page,
   PageLoader,
 } from '../../components/ui'
+import { useAuth } from '../../providers/auth-context'
 import { useToast } from '../../providers/toast'
 import { workspaceApi } from '../../services/workspaceApi'
 import type { TicketPriority, TicketStatus } from '../../types'
@@ -26,6 +27,8 @@ import { TicketProperties } from './TicketProperties'
 
 export function TicketDetailPage() {
   const { ticketId = '' } = useParams()
+  const { user } = useAuth()
+  const canEdit = user?.memberships[0]?.role !== 'viewer'
   const queryClient = useQueryClient()
   const { notify } = useToast()
   const [activeTab, setActiveTab] = useState<'conversation' | 'activity'>(
@@ -162,6 +165,7 @@ export function TicketDetailPage() {
         <TicketDetailMain>
           <TicketConversation
             addingTag={addingTag}
+            canEdit={canEdit}
             commentPending={commentMutation.isPending}
             customer={customer}
             isInternal={isInternal}

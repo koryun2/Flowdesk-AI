@@ -6,6 +6,7 @@ import type {
   KnowledgeAnswer,
   KnowledgeDocument,
   Ticket,
+  TicketAttachment,
   TicketDraft,
   TicketFilters,
   TicketPriority,
@@ -61,6 +62,13 @@ interface ApiTicket {
     author: ApiUser | null
     body: string
     is_internal: boolean
+    created_at: string
+  }>
+  attachments?: Array<{
+    id: string
+    file_name: string
+    mime_type: string
+    size: number
     created_at: string
   }>
   activity?: Array<{
@@ -143,6 +151,8 @@ interface ApiDocument {
   source_type: KnowledgeDocument['sourceType']
   status: KnowledgeDocument['status']
   file_name?: string
+  mime_type?: string
+  has_file?: boolean
   source_url?: string
   error_message?: string
   chunk_count: number
@@ -158,6 +168,8 @@ function toDocument(document: ApiDocument): KnowledgeDocument {
     sourceType: document.source_type,
     status: document.status,
     fileName: document.file_name || undefined,
+    mimeType: document.mime_type || undefined,
+    hasFile: Boolean(document.has_file),
     sourceUrl: document.source_url || undefined,
     size: document.size,
     chunks: document.chunk_count,
@@ -320,6 +332,15 @@ function toTicket(ticket: ApiTicket): Ticket {
       isInternal: comment.is_internal,
       createdAt: comment.created_at,
     })),
+    attachments: (ticket.attachments ?? []).map(
+      (attachment): TicketAttachment => ({
+        id: attachment.id,
+        fileName: attachment.file_name,
+        mimeType: attachment.mime_type,
+        size: attachment.size,
+        createdAt: attachment.created_at,
+      }),
+    ),
     activity: (ticket.activity ?? []).map((item) => ({
       id: item.id,
       actor: item.actor,
@@ -469,6 +490,21 @@ export const workspaceApi = {
     return toTicket(ticket)
   },
 
+  async addTicketAttachment(ticketId: string, file: File) {
+    const body = new FormData()
+    body.set('file', file)
+    return request<{ id: string }>(`/api/v1/tickets/${ticketId}/attachments/`, {
+      method: 'POST',
+      body,
+    })
+  },
+
+  async deleteTicketAttachment(ticketId: string, attachmentId: string) {
+    await request<void>(`/api/v1/tickets/${ticketId}/attachments/${attachmentId}/`, {
+      method: 'DELETE',
+    })
+  },
+
   async listCustomers(search = '') {
     const params = new URLSearchParams({ page_size: '100', ordering: 'name' })
     if (search.trim()) params.set('search', search.trim())
@@ -562,7 +598,52 @@ export const workspaceApi = {
     )
   },
 
-  async askKnowledge(question: string) {
+  async documentContent(id: string) {
+    return request<{
+      content: string
+      source_type: KnowledgeDocument['sourceType']
+      source_url: string
+      file_name: string
+    }>(`/api/v1/documents/${id}/content/`)
+  },
+
+  async updateDocument(
+    id: string,
+    input: {
+      title?: string
+      content?: string
+      sourceUrl?: string
+      refresh?: boolean
+      file?: File
+    },
+  ) {
+    if (input.file) {
+      const body = new FormData()
+      if (input.title) body.set('title', input.title)
+      body.set('file', input.file)
+      return toDocument(
+        await request<ApiDocument>(`/api/v1/documents/${id}/`, { method: 'PATCH', body }),
+      )
+    }
+    return toDocument(
+      await request<ApiDocument>(`/api/v1/documents/${id}/`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...(input.title !== undefined ? { title: input.title } : {}),
+          ...(input.content !== undefined ? { content: input.content } : {}),
+          ...(input.sourceUrl !== undefined ? { source_url: input.sourceUrl } : {}),
+          ...(input.refresh ? { refresh: true } : {}),
+        }),
+      }),
+    )
+  },
+
+  async deleteDocument(id: string) {
+    await request<void>(`/api/v1/documents/${id}/`, { method: 'DELETE' })
+  },
+
+  async askKnowledge(question: string, documentIds: string[] = []) {
     const answer = await request<{
       answer: string
       sources: Array<{
@@ -574,7 +655,10 @@ export const workspaceApi = {
     }>('/api/v1/documents/ask/', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question }),
+      body: JSON.stringify({
+        question,
+        ...(documentIds.length ? { document_ids: documentIds } : {}),
+      }),
     })
     return {
       answer: answer.answer,

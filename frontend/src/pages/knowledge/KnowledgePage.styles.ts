@@ -129,6 +129,33 @@ export const QuestionForm = styled.form`
   }
 `
 
+export const SourceScope = styled.div`
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 12px;
+`
+
+export const SourceChip = styled.button<{ $active: boolean }>`
+  max-width: 220px;
+  overflow: hidden;
+  padding: 5px 8px;
+  border: 1px solid ${({ theme, $active }) => ($active ? theme.primary : theme.border)};
+  border-radius: 999px;
+  background: ${({ theme, $active }) => ($active ? theme.primarySoft : '#fff')};
+  color: ${({ theme, $active }) => ($active ? theme.primary : theme.textSecondary)};
+  font-size: 9px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+`
+
+export const ScopeNote = styled.p`
+  margin-top: 8px;
+  color: ${({ theme }) => theme.textTertiary};
+  font-size: 8px;
+`
+
 export const QuestionInput = styled.input`
   min-width: 0;
   height: 40px;
@@ -168,6 +195,7 @@ export const KnowledgeAnswer = styled.div`
     color: #4b5265;
     font-size: 11px;
     line-height: 1.65;
+    white-space: pre-wrap;
   }
 `
 
@@ -419,6 +447,29 @@ export const DocumentUpdated = styled(DocumentCol)`
   }
 `
 
+export const RowActions = styled.div`
+  display: flex;
+  gap: 4px;
+`
+
+export const FieldNote = styled.p`
+  color: ${({ theme }) => theme.textTertiary};
+  font-size: 8px;
+`
+
+export const EditFooter = styled.div`
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+
+  > div {
+    display: flex;
+    gap: 8px;
+  }
+`
+
 export const DocumentStatusWrap = styled.div`
   ${media.phone} {
     display: none;
@@ -473,6 +524,10 @@ export const SourceTypeTab = styled.button<{ $active: boolean }>`
   background: ${({ theme, $active }) =>
     $active ? theme.primarySoft : '#fff'};
   font-size: 9px;
+`
+
+export const SourcePreview = styled.div`
+  margin-bottom: 14px;
 `
 
 export const FileDropzone = styled.label`

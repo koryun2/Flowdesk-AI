@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from unittest.mock import patch
 
 from django.urls import reverse
@@ -274,6 +275,34 @@ class AgentApiTests(APITestCase):
         self.assertIn(self.ticket["key"], response.data["content"])
         self.assertNotIn("about open", response.data["content"])
 
+    def test_gemini_reply_keeps_the_facts_and_drops_invented_tickets(self):
+        link = f"[{self.ticket['key']}](/tickets/{self.ticket['id']})"
+        spoken = "There is 1 open ticket."
+        with self._plan(
+            [{"name": "search_tickets", "arguments": {"status": "open"}}],
+            spoken=spoken,
+        ):
+            natural = self.client.post(
+                reverse("agent-turn"),
+                {"message": "how many open tickets we have?"},
+                format="json",
+            )
+        with self._plan(
+            [{"name": "search_tickets", "arguments": {"status": "open"}}],
+            spoken="There is also FD-9999 waiting.",
+        ):
+            invented = self.client.post(
+                reverse("agent-turn"),
+                {"message": "how many open tickets we have?"},
+                format="json",
+            )
+
+        self.assertIn(spoken, natural.data["content"])
+        self.assertIn(link, natural.data["content"])
+        self.assertIn("1 open ticket", invented.data["content"])
+        self.assertIn(link, invented.data["content"])
+        self.assertNotIn("FD-9999", invented.data["content"])
+
     def test_customer_roster_counts_the_workspace(self):
         with self._plan([{"name": "get_customer", "arguments": {"scope": "all"}}]):
             response = self.client.post(
@@ -378,8 +407,13 @@ class AgentApiTests(APITestCase):
         self.assertNotIn("client prior", seen[1]["prior"])
         self.assertEqual(seen[1]["model"], "gemini-3.6-flash")
 
-    def _plan(self, calls, reply=""):
-        return patch(
-            "ai_ops.agent_service.request_plan",
-            return_value={"tool_calls": calls, "reply": reply, "model_name": "test-agent"},
-        )
+    @contextmanager
+    def _plan(self, calls, reply="", spoken=""):
+        with (
+            patch(
+                "ai_ops.agent_service.request_plan",
+                return_value={"tool_calls": calls, "reply": reply, "model_name": "test-agent"},
+            ),
+            patch("ai_ops.agent_service.request_reply", return_value=spoken),
+        ):
+            yield

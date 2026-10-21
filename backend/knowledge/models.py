@@ -7,6 +7,10 @@ from core.models import TimeStampedUUIDModel
 from organizations.models import Organization
 
 
+def knowledge_upload_path(instance, filename: str) -> str:
+    return f"knowledge/{instance.organization_id}/{instance.id}/{filename}"
+
+
 class KnowledgeDocument(TimeStampedUUIDModel):
     class SourceType(models.TextChoices):
         TEXT = "text", "Text"
@@ -43,6 +47,7 @@ class KnowledgeDocument(TimeStampedUUIDModel):
     source_url = models.URLField(blank=True)
     file_name = models.CharField(max_length=255, blank=True)
     mime_type = models.CharField(max_length=120, blank=True)
+    stored_file = models.FileField(upload_to=knowledge_upload_path, blank=True, max_length=255)
     checksum = models.CharField(max_length=64, blank=True)
     status = models.CharField(
         max_length=20,

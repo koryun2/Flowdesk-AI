@@ -1,5 +1,9 @@
+import base64
+import tempfile
 from unittest.mock import patch
 
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import override_settings
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -7,6 +11,12 @@ from rest_framework.test import APITestCase
 from ai_ops.client import AnalysisError
 from core.testing import workspace
 from organizations.models import Membership
+
+
+def _file_bytes(response) -> bytes:
+    payload = b"".join(response.streaming_content)
+    response.close()
+    return payload
 
 
 ANALYSIS = {
@@ -266,6 +276,91 @@ class TicketApiTests(APITestCase):
         self.assertEqual(filtered.data["count"], 1)
         self.assertEqual(ticket.data["tags"][0]["name"], "export")
         self.assertEqual(members.data[0]["email"], self.user.email)
+
+    def test_ticket_screenshots(self):
+        png = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+        )
+        ticket = self._create("Screenshot ticket", "medium")
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as media:
+            with override_settings(MEDIA_ROOT=media):
+                created = self.client.post(
+                    reverse("ticket-attachments", args=[ticket.data["id"]]),
+                    {"file": SimpleUploadedFile("screen.png", png, content_type="image/png")},
+                    format="multipart",
+                )
+                listed = self.client.get(reverse("ticket-list"))
+                detail = self.client.get(reverse("ticket-detail", args=[ticket.data["id"]]))
+                downloaded = self.client.get(
+                    reverse("ticket-attachment", args=[ticket.data["id"], created.data["id"]])
+                )
+                downloaded_bytes = _file_bytes(downloaded)
+                notes = SimpleUploadedFile("notes.txt", b"not an image", content_type="text/plain")
+                rejected = self.client.post(
+                    reverse("ticket-attachments", args=[ticket.data["id"]]),
+                    {"file": notes},
+                    format="multipart",
+                )
+                for index in range(7):
+                    extra = self.client.post(
+                        reverse("ticket-attachments", args=[ticket.data["id"]]),
+                        {
+                            "file": SimpleUploadedFile(
+                                f"shot-{index}.png",
+                                png,
+                                content_type="image/png",
+                            )
+                        },
+                        format="multipart",
+                    )
+                    self.assertEqual(extra.status_code, status.HTTP_201_CREATED)
+                full = self.client.post(
+                    reverse("ticket-attachments", args=[ticket.data["id"]]),
+                    {"file": SimpleUploadedFile("ninth.png", png, content_type="image/png")},
+                    format="multipart",
+                )
+                viewer_client, viewer, _organization = workspace(
+                    role=Membership.Role.VIEWER,
+                    email="shot-viewer@example.com",
+                    slug="shot-viewer",
+                )
+                Membership.objects.filter(user=viewer).update(organization=self.organization)
+                viewer_file = viewer_client.get(
+                    reverse("ticket-attachment", args=[ticket.data["id"], created.data["id"]])
+                )
+                _file_bytes(viewer_file)
+                viewer_post = viewer_client.post(
+                    reverse("ticket-attachments", args=[ticket.data["id"]]),
+                    {"file": SimpleUploadedFile("blocked.png", png, content_type="image/png")},
+                    format="multipart",
+                )
+                agent_client, agent, _organization = workspace(
+                    role=Membership.Role.AGENT,
+                    email="shot-agent@example.com",
+                    slug="shot-agent",
+                )
+                Membership.objects.filter(user=agent).update(organization=self.organization)
+                removed = agent_client.delete(
+                    reverse("ticket-attachment", args=[ticket.data["id"], created.data["id"]])
+                )
+                missing = self.client.get(
+                    reverse("ticket-attachment", args=[ticket.data["id"], created.data["id"]])
+                )
+
+        self.assertEqual(ticket.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(created.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(created.data["file_name"], "screen.png")
+        self.assertEqual(created.data["mime_type"], "image/png")
+        self.assertNotIn("attachments", listed.data["results"][0])
+        self.assertEqual(detail.data["attachments"][0]["id"], created.data["id"])
+        self.assertEqual(downloaded.status_code, status.HTTP_200_OK)
+        self.assertEqual(downloaded_bytes, png)
+        self.assertEqual(rejected.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(full.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(viewer_file.status_code, status.HTTP_200_OK)
+        self.assertEqual(viewer_post.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(removed.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(missing.status_code, status.HTTP_404_NOT_FOUND)
 
     def _create(self, title, priority, customer_id=None, assignee_id=None, tag_ids=None):
         payload = {

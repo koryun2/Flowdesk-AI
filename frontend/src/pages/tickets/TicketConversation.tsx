@@ -1,6 +1,7 @@
 import { MessageSquare, Send, Tag } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { Avatar, Button } from '../../components/ui'
+import { TicketScreenshots } from './TicketScreenshots'
 import { formatDate, formatRelative } from '../../lib/utils'
 import type { Customer, Ticket } from '../../types'
 import {
@@ -20,6 +21,7 @@ import {
 export function TicketConversation({
   ticket,
   customer,
+  canEdit,
   reply,
   isInternal,
   addingTag,
@@ -35,6 +37,7 @@ export function TicketConversation({
   onTagSubmit,
 }: {
   ticket: Ticket
+  canEdit: boolean
   customer:
     | Pick<Customer, 'id' | 'name' | 'email' | 'company' | 'initials' | 'plan'>
     | undefined
@@ -74,6 +77,7 @@ export function TicketConversation({
         </TicketDescriptionAuthor>
         <TicketDescription>
           <p>{ticket.description}</p>
+          <TicketScreenshots canEdit={canEdit} ticket={ticket} />
         </TicketDescription>
         <TicketTags>
           {ticket.tags.map((tag) => (

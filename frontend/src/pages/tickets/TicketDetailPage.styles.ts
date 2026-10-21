@@ -691,3 +691,62 @@ export const NotFoundCard = styled(Card)`
     font-size: 11px;
   }
 `
+
+export const ScreenshotGrid = styled.div`
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+`
+
+export const ScreenshotTile = styled.div`
+  position: relative;
+  width: 148px;
+  height: 96px;
+  overflow: hidden;
+  border: 1px solid ${({ theme }) => theme.border};
+  border-radius: 8px;
+`
+
+export const ScreenshotAdd = styled.button`
+  display: grid;
+  width: 148px;
+  height: 96px;
+  place-items: center;
+  border: 1px dashed #cbd0dc;
+  border-radius: 8px;
+  color: ${({ theme }) => theme.primary};
+  background: #fafbff;
+
+  &:hover:not(:disabled) {
+    border-color: ${({ theme }) => theme.primary};
+    background: ${({ theme }) => theme.primarySoft};
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+  }
+`
+
+export const ScreenshotRemove = styled.button`
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border: 0;
+  border-radius: 999px;
+  color: #fff;
+  background: rgb(15 23 42 / 72%);
+
+  &:hover {
+    background: ${({ theme }) => theme.red};
+  }
+`
+
+export const HiddenFileInput = styled.input`
+  display: none;
+`

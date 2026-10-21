@@ -1,3 +1,5 @@
+import base64
+import tempfile
 from unittest.mock import patch
 from urllib.error import URLError
 
@@ -12,6 +14,16 @@ from knowledge.client import KnowledgeAIError
 from organizations.models import Membership
 
 
+def _file_bytes(response) -> bytes:
+    payload = b"".join(response.streaming_content)
+    response.close()
+    return payload
+
+
+PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+)
+
 EXPORT_GUIDE = (
     "Customers should export datasets above 50,000 rows through the background export endpoint, "
     "then poll the job until a signed download URL is returned. Export links remain active for 24 hours. "
@@ -21,6 +33,11 @@ EXPORT_GUIDE = (
 
 class KnowledgeApiTests(APITestCase):
     def setUp(self):
+        self.media = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(self.media.cleanup)
+        media_root = override_settings(MEDIA_ROOT=self.media.name)
+        media_root.enable()
+        self.addCleanup(media_root.disable)
         self.client, self.user, self.organization = workspace()
         self.embeddings = patch(
             "knowledge.services.request_embeddings",
@@ -302,11 +319,11 @@ class KnowledgeApiTests(APITestCase):
         self.assertEqual(hidden.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_markdown_upload_and_viewer_permissions(self):
-        upload = SimpleUploadedFile(
-            "auth.md",
-            b"API requests authenticate with a bearer token issued for the workspace. Send it on every request.",
-            content_type="text/markdown",
+        original = (
+            b"API requests authenticate with a bearer token issued for the workspace. "
+            b"Send it on every request."
         )
+        upload = SimpleUploadedFile("auth.md", original, content_type="text/markdown")
         created = self.client.post(
             reverse("document-list"),
             {"title": "API authentication", "source_type": "file", "file": upload},
@@ -334,12 +351,78 @@ class KnowledgeApiTests(APITestCase):
             format="json",
         )
 
+        downloaded = self.client.get(reverse("document-file", args=[created.data["id"]]))
+        viewer_file = viewer_client.get(reverse("document-file", args=[created.data["id"]]))
+        downloaded_bytes = _file_bytes(downloaded)
+        _file_bytes(viewer_file)
+
         self.assertEqual(created.status_code, status.HTTP_201_CREATED)
         self.assertEqual(created.data["file_name"], "auth.md")
+        self.assertTrue(created.data["has_file"])
+        self.assertEqual(downloaded.status_code, status.HTTP_200_OK)
+        self.assertEqual(downloaded_bytes, original)
+        self.assertEqual(viewer_file.status_code, status.HTTP_200_OK)
         self.assertEqual(listing.status_code, status.HTTP_200_OK)
         self.assertEqual(forbidden.status_code, status.HTTP_403_FORBIDDEN)
         self.assertEqual(answer.status_code, status.HTTP_200_OK)
         self.assertIn("bearer token", answer.data["answer"])
+
+    def test_images_are_stored_without_text_or_chunks(self):
+        created = self.client.post(
+            reverse("document-list"),
+            {
+                "title": "Night coverage notes",
+                "source_type": "text",
+                "content": EXPORT_GUIDE,
+            },
+            format="json",
+        )
+        replaced = self.client.patch(
+            reverse("document-detail", args=[created.data["id"]]),
+            {"file": SimpleUploadedFile("screen.png", PNG, content_type="image/png")},
+            format="multipart",
+        )
+        renamed = self.client.patch(
+            reverse("document-detail", args=[created.data["id"]]),
+            {"title": "Coverage screenshot"},
+            format="json",
+        )
+        downloaded = self.client.get(reverse("document-file", args=[created.data["id"]]))
+        downloaded_bytes = _file_bytes(downloaded)
+        body = self.client.get(reverse("document-content", args=[created.data["id"]]))
+        duplicate = self.client.post(
+            reverse("document-list"),
+            {
+                "title": "Same screenshot",
+                "source_type": "file",
+                "file": SimpleUploadedFile("again.png", PNG, content_type="image/png"),
+            },
+            format="multipart",
+        )
+        outsider, _user, _organization = workspace(email="outsider@example.com", slug="outside-files")
+        hidden = outsider.get(reverse("document-file", args=[created.data["id"]]))
+        viewer_client, viewer, _organization = workspace(
+            role=Membership.Role.VIEWER,
+            email="image-viewer@example.com",
+            slug="image-viewer",
+        )
+        Membership.objects.filter(user=viewer).update(organization=self.organization)
+        visible = viewer_client.get(reverse("document-file", args=[created.data["id"]]))
+        _file_bytes(visible)
+
+        self.assertEqual(created.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(replaced.status_code, status.HTTP_200_OK)
+        self.assertEqual(replaced.data["status"], "ready")
+        self.assertEqual(replaced.data["chunk_count"], 0)
+        self.assertEqual(replaced.data["mime_type"], "image/png")
+        self.assertTrue(replaced.data["has_file"])
+        self.assertEqual(renamed.status_code, status.HTTP_200_OK)
+        self.assertEqual(downloaded.status_code, status.HTTP_200_OK)
+        self.assertEqual(downloaded_bytes, PNG)
+        self.assertEqual(body.data["content"], "")
+        self.assertEqual(duplicate.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(hidden.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(visible.status_code, status.HTTP_200_OK)
 
     def test_remote_embeddings_are_stored(self):
         vector = [0.0] * 128
@@ -415,6 +498,218 @@ class KnowledgeApiTests(APITestCase):
             )
         self.assertEqual(created.status_code, status.HTTP_400_BAD_REQUEST)
 
+    def test_text_can_be_replaced_and_found_by_its_words(self):
+        created = self.client.post(
+            reverse("document-list"),
+            {
+                "title": "Shift guide",
+                "source_type": "text",
+                "content": EXPORT_GUIDE,
+            },
+            format="json",
+        )
+        updated = self.client.patch(
+            reverse("document-detail", args=[created.data["id"]]),
+            {
+                "content": (
+                    "Night shift coverage starts at 18:00 and ends at 02:00. "
+                    "The on-call engineer answers the queue."
+                )
+            },
+            format="json",
+        )
+        body = self.client.get(reverse("document-content", args=[created.data["id"]]))
+        found = self.client.get(reverse("document-list"), {"search": "on-call"})
+        answer = self.client.post(
+            reverse("document-ask"),
+            {"question": "When does night shift coverage start?"},
+            format="json",
+        )
+        kept = self.client.post(
+            reverse("document-list"),
+            {
+                "title": "Export guide",
+                "source_type": "text",
+                "content": EXPORT_GUIDE,
+            },
+            format="json",
+        )
+        duplicate = self.client.patch(
+            reverse("document-detail", args=[created.data["id"]]),
+            {"content": EXPORT_GUIDE},
+            format="json",
+        )
+
+        self.assertEqual(updated.status_code, status.HTTP_200_OK)
+        self.assertEqual(updated.data["status"], "ready")
+        self.assertEqual(updated.data["source_type"], "text")
+        self.assertIn("18:00", body.data["content"])
+        self.assertNotIn("50,000", body.data["content"])
+        self.assertEqual(found.data["results"][0]["id"], created.data["id"])
+        self.assertIn("18:00", answer.data["answer"])
+        self.assertEqual(kept.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(duplicate.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_questions_can_use_several_sections_and_selected_sources(self):
+        resume = self.client.post(
+            reverse("document-list"),
+            {
+                "title": "Resume",
+                "source_type": "text",
+                "content": (
+                    "Koryun Hayryan\n"
+                    "EDUCATION\n"
+                    "Bachelor's Degree in Economics Yerevan State University\n"
+                    "WORK EXPERIENCE\n"
+                    "Frontend Developer at Example Studio.\n"
+                ),
+            },
+            format="json",
+        )
+        billing = self.client.post(
+            reverse("document-list"),
+            {
+                "title": "Billing and subscription FAQ",
+                "source_type": "text",
+                "content": (
+                    "Invoices are billed monthly. Customers download invoices from the billing page."
+                ),
+            },
+            format="json",
+        )
+        with patch(
+            "knowledge.services.request_answer",
+            side_effect=AssertionError("section lookup should not call the model"),
+        ):
+            both = self.client.post(
+                reverse("document-ask"),
+                {"question": "What is Koryun Hayryan's education and experience?"},
+                format="json",
+            )
+        scoped = self.client.post(
+            reverse("document-ask"),
+            {
+                "question": "Where do customers download invoices?",
+                "document_ids": [resume.data["id"]],
+            },
+            format="json",
+        )
+        billing_only = self.client.post(
+            reverse("document-ask"),
+            {
+                "question": "Where do customers download invoices?",
+                "document_ids": [billing.data["id"]],
+            },
+            format="json",
+        )
+        missing = self.client.post(
+            reverse("document-ask"),
+            {
+                "question": "Where do customers download invoices?",
+                "document_ids": ["11111111-1111-1111-1111-111111111111"],
+            },
+            format="json",
+        )
+
+        self.assertEqual(both.status_code, status.HTTP_200_OK)
+        self.assertIn("Yerevan State University", both.data["answer"])
+        self.assertIn("Frontend Developer", both.data["answer"])
+        self.assertEqual(len(both.data["sources"]), 1)
+        self.assertNotIn(
+            billing.data["id"],
+            [source["document_id"] for source in scoped.data["sources"]],
+        )
+        self.assertNotIn("billing page", scoped.data["answer"].lower())
+        self.assertEqual(billing_only.data["sources"][0]["document_id"], billing.data["id"])
+        self.assertIn("billing page", billing_only.data["answer"])
+        self.assertEqual(missing.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_html_and_csv_uploads_are_indexed(self):
+        html = SimpleUploadedFile(
+            "reset.html",
+            (
+                b"<html><body><p>Customers reset a password from the account security page "
+                b"after confirming their work email.</p><script>secret()</script></body></html>"
+            ),
+            content_type="text/html",
+        )
+        csv = SimpleUploadedFile(
+            "plans.csv",
+            b"plan,limit\nstarter,Exports above 50000 rows use the background export queue\n",
+            content_type="text/csv",
+        )
+        page = self.client.post(
+            reverse("document-list"),
+            {"title": "Password reset", "source_type": "file", "file": html},
+            format="multipart",
+        )
+        table = self.client.post(
+            reverse("document-list"),
+            {"title": "Plan limits", "source_type": "file", "file": csv},
+            format="multipart",
+        )
+        body = self.client.get(reverse("document-content", args=[page.data["id"]]))
+
+        self.assertEqual(page.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(page.data["status"], "ready")
+        self.assertIn("account security", body.data["content"])
+        self.assertNotIn("secret()", body.data["content"])
+        self.assertEqual(table.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(table.data["file_name"], "plans.csv")
+        self.assertGreaterEqual(table.data["chunk_count"], 1)
+
+    def test_url_source_can_be_refreshed(self):
+        class Response:
+            def __init__(self, page):
+                self.page = page
+                self.headers = {"Content-Type": "text/html"}
+
+            def read(self, _limit):
+                return self.page
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+        pages = iter(
+            [
+                Response(
+                    b"<p>Webhook deliveries retry after a failed response and keep the signing secret.</p>"
+                ),
+                Response(
+                    b"<p>Webhook deliveries now wait five minutes between retries and record each attempt.</p>"
+                ),
+            ]
+        )
+        with (
+            patch("knowledge.services._public_http_url", return_value="https://docs.example.com/hooks"),
+            patch("knowledge.services.request.urlopen", side_effect=lambda *_args, **_kwargs: next(pages)),
+        ):
+            created = self.client.post(
+                reverse("document-list"),
+                {
+                    "title": "Webhooks troubleshooting",
+                    "source_type": "url",
+                    "source_url": "https://docs.example.com/hooks",
+                },
+                format="json",
+            )
+            refreshed = self.client.patch(
+                reverse("document-detail", args=[created.data["id"]]),
+                {"refresh": True},
+                format="json",
+            )
+        body = self.client.get(reverse("document-content", args=[created.data["id"]]))
+
+        self.assertEqual(created.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(refreshed.status_code, status.HTTP_200_OK)
+        self.assertEqual(refreshed.data["status"], "ready")
+        self.assertEqual(refreshed.data["source_type"], "url")
+        self.assertIn("five minutes", body.data["content"])
+        self.assertNotIn("signing secret", body.data["content"])
+
 
 class FakeRedis:
     def __init__(self):
@@ -485,6 +780,11 @@ class FakePipe:
 @override_settings(JOBS_EAGER=False)
 class RedisQueueTests(APITestCase):
     def setUp(self):
+        self.media = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(self.media.cleanup)
+        media_root = override_settings(MEDIA_ROOT=self.media.name)
+        media_root.enable()
+        self.addCleanup(media_root.disable)
         self.client, self.user, self.organization = workspace()
         self.embeddings = patch(
             "knowledge.services.request_embeddings",
